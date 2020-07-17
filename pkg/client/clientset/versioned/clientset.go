@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The KubeSphere Authors.
+Copyright 2020 The KubeSphere Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,24 +24,28 @@ import (
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"
+	auditingv1alpha1 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/auditing/v1alpha1"
 	clusterv1alpha1 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/cluster/v1alpha1"
 	devopsv1alpha1 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/devops/v1alpha1"
 	devopsv1alpha3 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/devops/v1alpha3"
 	iamv1alpha2 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/iam/v1alpha2"
 	networkv1alpha1 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/network/v1alpha1"
 	servicemeshv1alpha2 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/servicemesh/v1alpha2"
+	storagev1alpha1 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/storage/v1alpha1"
 	tenantv1alpha1 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/tenant/v1alpha1"
 	tenantv1alpha2 "kubesphere.io/kubesphere/pkg/client/clientset/versioned/typed/tenant/v1alpha2"
 )
 
 type Interface interface {
 	Discovery() discovery.DiscoveryInterface
+	AuditingV1alpha1() auditingv1alpha1.AuditingV1alpha1Interface
 	ClusterV1alpha1() clusterv1alpha1.ClusterV1alpha1Interface
 	DevopsV1alpha1() devopsv1alpha1.DevopsV1alpha1Interface
 	DevopsV1alpha3() devopsv1alpha3.DevopsV1alpha3Interface
 	IamV1alpha2() iamv1alpha2.IamV1alpha2Interface
 	NetworkV1alpha1() networkv1alpha1.NetworkV1alpha1Interface
 	ServicemeshV1alpha2() servicemeshv1alpha2.ServicemeshV1alpha2Interface
+	StorageV1alpha1() storagev1alpha1.StorageV1alpha1Interface
 	TenantV1alpha1() tenantv1alpha1.TenantV1alpha1Interface
 	TenantV1alpha2() tenantv1alpha2.TenantV1alpha2Interface
 }
@@ -50,14 +54,21 @@ type Interface interface {
 // version included in a Clientset.
 type Clientset struct {
 	*discovery.DiscoveryClient
+	auditingV1alpha1    *auditingv1alpha1.AuditingV1alpha1Client
 	clusterV1alpha1     *clusterv1alpha1.ClusterV1alpha1Client
 	devopsV1alpha1      *devopsv1alpha1.DevopsV1alpha1Client
 	devopsV1alpha3      *devopsv1alpha3.DevopsV1alpha3Client
 	iamV1alpha2         *iamv1alpha2.IamV1alpha2Client
 	networkV1alpha1     *networkv1alpha1.NetworkV1alpha1Client
 	servicemeshV1alpha2 *servicemeshv1alpha2.ServicemeshV1alpha2Client
+	storageV1alpha1     *storagev1alpha1.StorageV1alpha1Client
 	tenantV1alpha1      *tenantv1alpha1.TenantV1alpha1Client
 	tenantV1alpha2      *tenantv1alpha2.TenantV1alpha2Client
+}
+
+// AuditingV1alpha1 retrieves the AuditingV1alpha1Client
+func (c *Clientset) AuditingV1alpha1() auditingv1alpha1.AuditingV1alpha1Interface {
+	return c.auditingV1alpha1
 }
 
 // ClusterV1alpha1 retrieves the ClusterV1alpha1Client
@@ -88,6 +99,11 @@ func (c *Clientset) NetworkV1alpha1() networkv1alpha1.NetworkV1alpha1Interface {
 // ServicemeshV1alpha2 retrieves the ServicemeshV1alpha2Client
 func (c *Clientset) ServicemeshV1alpha2() servicemeshv1alpha2.ServicemeshV1alpha2Interface {
 	return c.servicemeshV1alpha2
+}
+
+// StorageV1alpha1 retrieves the StorageV1alpha1Client
+func (c *Clientset) StorageV1alpha1() storagev1alpha1.StorageV1alpha1Interface {
+	return c.storageV1alpha1
 }
 
 // TenantV1alpha1 retrieves the TenantV1alpha1Client
@@ -121,6 +137,10 @@ func NewForConfig(c *rest.Config) (*Clientset, error) {
 	}
 	var cs Clientset
 	var err error
+	cs.auditingV1alpha1, err = auditingv1alpha1.NewForConfig(&configShallowCopy)
+	if err != nil {
+		return nil, err
+	}
 	cs.clusterV1alpha1, err = clusterv1alpha1.NewForConfig(&configShallowCopy)
 	if err != nil {
 		return nil, err
@@ -145,6 +165,10 @@ func NewForConfig(c *rest.Config) (*Clientset, error) {
 	if err != nil {
 		return nil, err
 	}
+	cs.storageV1alpha1, err = storagev1alpha1.NewForConfig(&configShallowCopy)
+	if err != nil {
+		return nil, err
+	}
 	cs.tenantV1alpha1, err = tenantv1alpha1.NewForConfig(&configShallowCopy)
 	if err != nil {
 		return nil, err
@@ -165,12 +189,14 @@ func NewForConfig(c *rest.Config) (*Clientset, error) {
 // panics if there is an error in the config.
 func NewForConfigOrDie(c *rest.Config) *Clientset {
 	var cs Clientset
+	cs.auditingV1alpha1 = auditingv1alpha1.NewForConfigOrDie(c)
 	cs.clusterV1alpha1 = clusterv1alpha1.NewForConfigOrDie(c)
 	cs.devopsV1alpha1 = devopsv1alpha1.NewForConfigOrDie(c)
 	cs.devopsV1alpha3 = devopsv1alpha3.NewForConfigOrDie(c)
 	cs.iamV1alpha2 = iamv1alpha2.NewForConfigOrDie(c)
 	cs.networkV1alpha1 = networkv1alpha1.NewForConfigOrDie(c)
 	cs.servicemeshV1alpha2 = servicemeshv1alpha2.NewForConfigOrDie(c)
+	cs.storageV1alpha1 = storagev1alpha1.NewForConfigOrDie(c)
 	cs.tenantV1alpha1 = tenantv1alpha1.NewForConfigOrDie(c)
 	cs.tenantV1alpha2 = tenantv1alpha2.NewForConfigOrDie(c)
 
@@ -181,12 +207,14 @@ func NewForConfigOrDie(c *rest.Config) *Clientset {
 // New creates a new Clientset for the given RESTClient.
 func New(c rest.Interface) *Clientset {
 	var cs Clientset
+	cs.auditingV1alpha1 = auditingv1alpha1.New(c)
 	cs.clusterV1alpha1 = clusterv1alpha1.New(c)
 	cs.devopsV1alpha1 = devopsv1alpha1.New(c)
 	cs.devopsV1alpha3 = devopsv1alpha3.New(c)
 	cs.iamV1alpha2 = iamv1alpha2.New(c)
 	cs.networkV1alpha1 = networkv1alpha1.New(c)
 	cs.servicemeshV1alpha2 = servicemeshv1alpha2.New(c)
+	cs.storageV1alpha1 = storagev1alpha1.New(c)
 	cs.tenantV1alpha1 = tenantv1alpha1.New(c)
 	cs.tenantV1alpha2 = tenantv1alpha2.New(c)
 

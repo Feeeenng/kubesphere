@@ -8,7 +8,6 @@ import (
 	"github.com/elastic/go-elasticsearch/v5"
 	"github.com/elastic/go-elasticsearch/v5/esapi"
 	"io/ioutil"
-	"k8s.io/klog"
 	"time"
 )
 
@@ -17,22 +16,19 @@ type Elastic struct {
 	index  string
 }
 
-func New(address string, index string) *Elastic {
+func New(address string, index string) (*Elastic, error) {
 	client, err := elasticsearch.NewClient(elasticsearch.Config{
 		Addresses: []string{address},
 	})
-	if err != nil {
-		klog.Error(err)
-		return nil
-	}
 
-	return &Elastic{client: client, index: index}
+	return &Elastic{client: client, index: index}, err
 }
 
-func (e *Elastic) Search(body []byte, scroll bool) ([]byte, error) {
+func (e *Elastic) Search(indices string, body []byte, scroll bool) ([]byte, error) {
 	opts := []func(*esapi.SearchRequest){
 		e.client.Search.WithContext(context.Background()),
-		e.client.Search.WithIndex(fmt.Sprintf("%s*", e.index)),
+		e.client.Search.WithIndex(indices),
+		e.client.Search.WithIgnoreUnavailable(true),
 		e.client.Search.WithBody(bytes.NewBuffer(body)),
 	}
 	if scroll {

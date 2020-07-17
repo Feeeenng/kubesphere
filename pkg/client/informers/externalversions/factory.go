@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The KubeSphere Authors.
+Copyright 2020 The KubeSphere Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,12 +28,14 @@ import (
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
 	versioned "kubesphere.io/kubesphere/pkg/client/clientset/versioned"
+	auditing "kubesphere.io/kubesphere/pkg/client/informers/externalversions/auditing"
 	cluster "kubesphere.io/kubesphere/pkg/client/informers/externalversions/cluster"
 	devops "kubesphere.io/kubesphere/pkg/client/informers/externalversions/devops"
 	iam "kubesphere.io/kubesphere/pkg/client/informers/externalversions/iam"
 	internalinterfaces "kubesphere.io/kubesphere/pkg/client/informers/externalversions/internalinterfaces"
 	network "kubesphere.io/kubesphere/pkg/client/informers/externalversions/network"
 	servicemesh "kubesphere.io/kubesphere/pkg/client/informers/externalversions/servicemesh"
+	storage "kubesphere.io/kubesphere/pkg/client/informers/externalversions/storage"
 	tenant "kubesphere.io/kubesphere/pkg/client/informers/externalversions/tenant"
 )
 
@@ -177,12 +179,18 @@ type SharedInformerFactory interface {
 	ForResource(resource schema.GroupVersionResource) (GenericInformer, error)
 	WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
 
+	Auditing() auditing.Interface
 	Cluster() cluster.Interface
 	Devops() devops.Interface
 	Iam() iam.Interface
 	Network() network.Interface
 	Servicemesh() servicemesh.Interface
+	Storage() storage.Interface
 	Tenant() tenant.Interface
+}
+
+func (f *sharedInformerFactory) Auditing() auditing.Interface {
+	return auditing.New(f, f.namespace, f.tweakListOptions)
 }
 
 func (f *sharedInformerFactory) Cluster() cluster.Interface {
@@ -203,6 +211,10 @@ func (f *sharedInformerFactory) Network() network.Interface {
 
 func (f *sharedInformerFactory) Servicemesh() servicemesh.Interface {
 	return servicemesh.New(f, f.namespace, f.tweakListOptions)
+}
+
+func (f *sharedInformerFactory) Storage() storage.Interface {
+	return storage.New(f, f.namespace, f.tweakListOptions)
 }
 
 func (f *sharedInformerFactory) Tenant() tenant.Interface {

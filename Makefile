@@ -34,7 +34,7 @@ define ALL_HELP_INFO
 #           debugging tools like delve.
 endef
 .PHONY: all
-all: test hypersphere ks-apiserver controller-manager
+all: test ks-apiserver controller-manager
 
 # Build ks-apiserver binary
 ks-apiserver: fmt vet
@@ -43,10 +43,6 @@ ks-apiserver: fmt vet
 # Build controller-manager binary
 controller-manager: fmt vet
 	hack/gobuild.sh cmd/controller-manager
-
-# Build hypersphere binary
-hypersphere: fmt vet
-	hack/gobuild.sh cmd/hypersphere
 
 # Run go fmt against code 
 fmt: generate
@@ -58,7 +54,7 @@ vet: generate
 
 # Generate manifests e.g. CRD, RBAC etc.
 manifests:
-	go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-gen/main.go object:headerFile=./hack/boilerplate.go.txt paths=./pkg/apis/... rbac:roleName=controller-perms ${CRD_OPTIONS} output:crd:artifacts:config=config/crd/bases
+	go run ./vendor/sigs.k8s.io/controller-tools/cmd/controller-gen/main.go object:headerFile=./hack/boilerplate.go.txt paths=./pkg/apis/... rbac:roleName=controller-perms ${CRD_OPTIONS} output:crd:artifacts:config=config/crds
 
 deploy: manifests
 	kubectl apply -f config/crds
@@ -68,6 +64,9 @@ deploy: manifests
 # Futher more about go:genreate . https://blog.golang.org/generate
 generate:
 	go generate ./pkg/... ./cmd/...
+
+mockgen:
+	mockgen -package=openpitrix -source=pkg/simple/client/openpitrix/openpitrix.go -destination=pkg/simple/client/openpitrix/mock.go
 
 deepcopy:
 	GO111MODULE=on go install -mod=vendor k8s.io/code-generator/cmd/deepcopy-gen

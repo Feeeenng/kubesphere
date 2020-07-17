@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"github.com/emicklei/go-restful"
 	"io"
+	"io/ioutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
@@ -29,12 +31,10 @@ import (
 
 const (
 	defaultAgentImage = "kubesphere/tower:v1.0"
-	defaultTimeout    = 5 * time.Second
+	defaultTimeout    = 10 * time.Second
 )
 
 var errClusterConnectionIsNotProxy = fmt.Errorf("cluster is not using proxy connection")
-var errNon200Response = fmt.Errorf("non-200 response returned from endpoint")
-var errInvalidResponse = fmt.Errorf("invalid response from kubesphere apiserver")
 
 type handler struct {
 	serviceLister v1.ServiceLister
@@ -45,7 +45,7 @@ type handler struct {
 	yamlPrinter   *printers.YAMLPrinter
 }
 
-func NewHandler(serviceLister v1.ServiceLister, clusterLister clusterlister.ClusterLister, proxyService, proxyAddress, agentImage string) *handler {
+func newHandler(serviceLister v1.ServiceLister, clusterLister clusterlister.ClusterLister, proxyService, proxyAddress, agentImage string) *handler {
 
 	if len(agentImage) == 0 {
 		agentImage = defaultAgentImage
@@ -61,7 +61,10 @@ func NewHandler(serviceLister v1.ServiceLister, clusterLister clusterlister.Clus
 	}
 }
 
-func (h *handler) GenerateAgentDeployment(request *restful.Request, response *restful.Response) {
+// generateAgentDeployment will return a deployment yaml for proxy connection type cluster
+// ProxyPublishAddress takes high precedence over proxyPublishService, use proxyPublishService ingress
+// address only when proxyPublishAddress is not provided.
+func (h *handler) generateAgentDeployment(request *restful.Request, response *restful.Response) {
 	clusterName := request.PathParameter("cluster")
 
 	cluster, err := h.clusterLister.Get(clusterName)
@@ -113,11 +116,11 @@ func (h *handler) populateProxyAddress() error {
 
 	service, err := h.serviceLister.Services(namespace).Get(parts[0])
 	if err != nil {
-		return err
+		return fmt.Errorf("service %s not found in namespace %s", parts[0], namespace)
 	}
 
 	if len(service.Spec.Ports) == 0 {
-		return fmt.Errorf("there are no ports in proxy service spec")
+		return fmt.Errorf("there are no ports in proxy service %s spec", h.proxyService)
 	}
 
 	port := service.Spec.Ports[0].Port
@@ -134,7 +137,9 @@ func (h *handler) populateProxyAddress() error {
 	}
 
 	if len(serviceAddress) == 0 {
-		return fmt.Errorf("service ingress is empty")
+		return fmt.Errorf("cannot generate agent deployment yaml for member cluster "+
+			" because %s service has no public address, please check %s status, or set address "+
+			" mannually in ClusterConfiguration", h.proxyService, h.proxyService)
 	}
 
 	h.proxyAddress = serviceAddress
@@ -146,6 +151,11 @@ func (h *handler) populateProxyAddress() error {
 // if we want to change the template.
 // TODO(jeff): load template from configmap
 func (h *handler) generateDefaultDeployment(cluster *v1alpha1.Cluster, w io.Writer) error {
+
+	_, err := url.Parse(h.proxyAddress)
+	if err != nil {
+		return fmt.Errorf("invalid proxy address %s, should format like http[s]://1.2.3.4:123", h.proxyAddress)
+	}
 
 	if cluster.Spec.Connection.Type == v1alpha1.ConnectionTypeDirect {
 		return errClusterConnectionIsNotProxy
@@ -184,9 +194,10 @@ func (h *handler) generateDefaultDeployment(cluster *v1alpha1.Cluster, w io.Writ
 								fmt.Sprintf("--name=%s", cluster.Name),
 								fmt.Sprintf("--token=%s", cluster.Spec.Connection.Token),
 								fmt.Sprintf("--proxy-server=%s", h.proxyAddress),
-								fmt.Sprintf("--keepalive=30s"),
+								fmt.Sprintf("--keepalive=10s"),
 								fmt.Sprintf("--kubesphere-service=ks-apiserver.kubesphere-system.svc:80"),
 								fmt.Sprintf("--kubernetes-service=kubernetes.default.svc:443"),
+								fmt.Sprintf("--v=0"),
 							},
 							Image: h.agentImage,
 							Resources: corev1.ResourceRequirements{
@@ -211,7 +222,7 @@ func (h *handler) generateDefaultDeployment(cluster *v1alpha1.Cluster, w io.Writ
 }
 
 // ValidateCluster validate cluster kubeconfig and kubesphere apiserver address, check their accessibility
-func (h *handler) ValidateCluster(request *restful.Request, response *restful.Response) {
+func (h *handler) validateCluster(request *restful.Request, response *restful.Response) {
 	var cluster v1alpha1.Cluster
 
 	err := request.ReadEntity(&cluster)
@@ -221,22 +232,22 @@ func (h *handler) ValidateCluster(request *restful.Request, response *restful.Re
 	}
 
 	if cluster.Spec.Connection.Type != v1alpha1.ConnectionTypeDirect {
-		api.HandleBadRequest(response, request, fmt.Errorf("cluster connection type is not direct"))
+		api.HandleBadRequest(response, request, fmt.Errorf("cluster connection type MUST be direct"))
 		return
 	}
 
-	if len(cluster.Spec.Connection.KubeConfig) == 0 || len(cluster.Spec.Connection.KubeSphereAPIEndpoint) == 0 {
-		api.HandleBadRequest(response, request, fmt.Errorf("cluster kubeconfig and kubesphere endpoint should not be empty"))
+	if len(cluster.Spec.Connection.KubeConfig) == 0 {
+		api.HandleBadRequest(response, request, fmt.Errorf("cluster kubeconfig MUST NOT be empty"))
 		return
 	}
 
-	err = validateKubeConfig(cluster.Spec.Connection.KubeConfig)
+	err = h.validateKubeConfig(cluster.Spec.Connection.KubeConfig)
 	if err != nil {
 		api.HandleBadRequest(response, request, err)
 		return
 	}
 
-	_, err = validateKubeSphereAPIServer(cluster.Spec.Connection.KubeSphereAPIEndpoint)
+	_, err = validateKubeSphereAPIServer(cluster.Spec.Connection.KubeSphereAPIEndpoint, cluster.Spec.Connection.KubeConfig)
 	if err != nil {
 		api.HandleBadRequest(response, request, fmt.Errorf("unable validate kubesphere endpoint, %v", err))
 		return
@@ -246,10 +257,23 @@ func (h *handler) ValidateCluster(request *restful.Request, response *restful.Re
 }
 
 // validateKubeConfig takes base64 encoded kubeconfig and check its validity
-func validateKubeConfig(kubeconfig []byte) error {
+func (h *handler) validateKubeConfig(kubeconfig []byte) error {
 	config, err := loadKubeConfigFromBytes(kubeconfig)
 	if err != nil {
 		return err
+	}
+
+	clusters, err := h.clusterLister.List(labels.Everything())
+	if err != nil {
+		return err
+	}
+
+	// clusters with the exactly same KubernetesAPIEndpoint considered to be one
+	// MUST not import the same cluster twice
+	for _, cluster := range clusters {
+		if len(cluster.Spec.Connection.KubernetesAPIEndpoint) != 0 && cluster.Spec.Connection.KubernetesAPIEndpoint == config.Host {
+			return fmt.Errorf("existing cluster %s with the exacty same server address, MUST not import the same cluster twice", cluster.Name)
+		}
 	}
 
 	config.Timeout = defaultTimeout
@@ -279,16 +303,36 @@ func loadKubeConfigFromBytes(kubeconfig []byte) (*rest.Config, error) {
 }
 
 // validateKubeSphereAPIServer uses version api to check the accessibility
-func validateKubeSphereAPIServer(ksEndpoint string) (*version.Info, error) {
-	_, err := url.Parse(ksEndpoint)
-	if err != nil {
-		return nil, err
+// If kubesphere apiserver endpoint is not provided, use kube-apiserver proxy instead
+func validateKubeSphereAPIServer(ksEndpoint string, kubeconfig []byte) (*version.Info, error) {
+	if len(ksEndpoint) == 0 && len(kubeconfig) == 0 {
+		return nil, fmt.Errorf("neither kubesphere api endpoint nor kubeconfig was provided")
+	}
+
+	client := http.Client{
+		Timeout: defaultTimeout,
 	}
 
 	path := fmt.Sprintf("%s/kapis/version", ksEndpoint)
 
-	client := http.Client{
-		Timeout: defaultTimeout,
+	if len(ksEndpoint) != 0 {
+		_, err := url.Parse(ksEndpoint)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		config, err := loadKubeConfigFromBytes(kubeconfig)
+		if err != nil {
+			return nil, err
+		}
+
+		transport, err := rest.TransportFor(config)
+		if err != nil {
+			return nil, err
+		}
+
+		client.Transport = transport
+		path = fmt.Sprintf("%s/api/v1/namespaces/kubesphere-system/services/:ks-apiserver:/proxy/kapis/version", config.Host)
 	}
 
 	response, err := client.Get(path)
@@ -296,14 +340,19 @@ func validateKubeSphereAPIServer(ksEndpoint string) (*version.Info, error) {
 		return nil, err
 	}
 
+	responseBytes, _ := ioutil.ReadAll(response.Body)
+	responseBody := string(responseBytes)
+
+	response.Body = ioutil.NopCloser(bytes.NewBuffer(responseBytes))
+
 	if response.StatusCode != http.StatusOK {
-		return nil, errNon200Response
+		return nil, fmt.Errorf("invalid response: %s , please make sure ks-apiserver.kubesphere-system.svc of member cluster is up and running", responseBody)
 	}
 
 	ver := version.Info{}
 	err = json.NewDecoder(response.Body).Decode(&ver)
 	if err != nil {
-		return nil, errInvalidResponse
+		return nil, fmt.Errorf("invalid response: %s , please make sure ks-apiserver.kubesphere-system.svc of member cluster is up and running", responseBody)
 	}
 
 	return &ver, nil

@@ -17,16 +17,20 @@ limitations under the License.
 package tenant
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 	"kubesphere.io/kubesphere/pkg/api"
+	auditingv1alpha1 "kubesphere.io/kubesphere/pkg/api/auditing/v1alpha1"
 	eventsv1alpha1 "kubesphere.io/kubesphere/pkg/api/events/v1alpha1"
 	loggingv1alpha2 "kubesphere.io/kubesphere/pkg/api/logging/v1alpha2"
 	clusterv1alpha1 "kubesphere.io/kubesphere/pkg/apis/cluster/v1alpha1"
@@ -35,13 +39,16 @@ import (
 	"kubesphere.io/kubesphere/pkg/apiserver/authorization/authorizer"
 	"kubesphere.io/kubesphere/pkg/apiserver/authorization/authorizerfactory"
 	"kubesphere.io/kubesphere/pkg/apiserver/query"
+	"kubesphere.io/kubesphere/pkg/apiserver/request"
 	kubesphere "kubesphere.io/kubesphere/pkg/client/clientset/versioned"
 	"kubesphere.io/kubesphere/pkg/informers"
+	"kubesphere.io/kubesphere/pkg/models/auditing"
 	"kubesphere.io/kubesphere/pkg/models/events"
 	"kubesphere.io/kubesphere/pkg/models/iam/am"
 	"kubesphere.io/kubesphere/pkg/models/logging"
 	resources "kubesphere.io/kubesphere/pkg/models/resources/v1alpha3"
 	resourcesv1alpha3 "kubesphere.io/kubesphere/pkg/models/resources/v1alpha3/resource"
+	auditingclient "kubesphere.io/kubesphere/pkg/simple/client/auditing"
 	eventsclient "kubesphere.io/kubesphere/pkg/simple/client/events"
 	loggingclient "kubesphere.io/kubesphere/pkg/simple/client/logging"
 	"kubesphere.io/kubesphere/pkg/utils/stringutils"
@@ -58,10 +65,16 @@ type Interface interface {
 	UpdateWorkspace(workspace *tenantv1alpha2.WorkspaceTemplate) (*tenantv1alpha2.WorkspaceTemplate, error)
 	DescribeWorkspace(workspace string) (*tenantv1alpha2.WorkspaceTemplate, error)
 	ListWorkspaceClusters(workspace string) (*api.ListResult, error)
-
 	Events(user user.Info, queryParam *eventsv1alpha1.Query) (*eventsv1alpha1.APIResponse, error)
 	QueryLogs(user user.Info, query *loggingv1alpha2.Query) (*loggingv1alpha2.APIResponse, error)
 	ExportLogs(user user.Info, query *loggingv1alpha2.Query, writer io.Writer) error
+	Auditing(user user.Info, queryParam *auditingv1alpha1.Query) (*auditingv1alpha1.APIResponse, error)
+	DescribeNamespace(workspace, namespace string) (*corev1.Namespace, error)
+	DeleteNamespace(workspace, namespace string) error
+	UpdateNamespace(workspace string, namespace *corev1.Namespace) (*corev1.Namespace, error)
+	PatchNamespace(workspace string, namespace *corev1.Namespace) (*corev1.Namespace, error)
+	PatchWorkspace(workspace *tenantv1alpha2.WorkspaceTemplate) (*tenantv1alpha2.WorkspaceTemplate, error)
+	ListClusters(info user.Info) (*api.ListResult, error)
 }
 
 type tenantOperator struct {
@@ -72,9 +85,10 @@ type tenantOperator struct {
 	resourceGetter *resourcesv1alpha3.ResourceGetter
 	events         events.Interface
 	lo             logging.LoggingOperator
+	auditing       auditing.Interface
 }
 
-func New(informers informers.InformerFactory, k8sclient kubernetes.Interface, ksclient kubesphere.Interface, evtsClient eventsclient.Client, loggingClient loggingclient.Interface) Interface {
+func New(informers informers.InformerFactory, k8sclient kubernetes.Interface, ksclient kubesphere.Interface, evtsClient eventsclient.Client, loggingClient loggingclient.Interface, auditingclient auditingclient.Client) Interface {
 	amOperator := am.NewReadOnlyOperator(informers)
 	authorizer := authorizerfactory.NewRBACAuthorizer(amOperator)
 	return &tenantOperator{
@@ -85,6 +99,7 @@ func New(informers informers.InformerFactory, k8sclient kubernetes.Interface, ks
 		ksclient:       ksclient,
 		events:         events.NewEventsOperator(evtsClient),
 		lo:             logging.NewLoggingOperator(loggingClient),
+		auditing:       auditing.NewEventsOperator(auditingclient),
 	}
 }
 
@@ -93,10 +108,10 @@ func (t *tenantOperator) ListWorkspaces(user user.Info, queryParam *query.Query)
 	listWS := authorizer.AttributesRecord{
 		User:            user,
 		Verb:            "list",
-		APIGroup:        "tenant.kubesphere.io",
-		APIVersion:      "v1alpha2",
+		APIGroup:        "*",
 		Resource:        "workspaces",
 		ResourceRequest: true,
+		ResourceScope:   request.GlobalScope,
 	}
 
 	decision, _, err := t.authorizer.Authorize(listWS)
@@ -148,27 +163,30 @@ func (t *tenantOperator) ListWorkspaces(user user.Info, queryParam *query.Query)
 	}
 
 	result := resources.DefaultList(workspaces, queryParam, func(left runtime.Object, right runtime.Object, field query.Field) bool {
-		return resources.DefaultObjectMetaCompare(left.(*tenantv1alpha1.Workspace).ObjectMeta, right.(*tenantv1alpha1.Workspace).ObjectMeta, field)
+		return resources.DefaultObjectMetaCompare(left.(*tenantv1alpha2.WorkspaceTemplate).ObjectMeta, right.(*tenantv1alpha2.WorkspaceTemplate).ObjectMeta, field)
 	}, func(workspace runtime.Object, filter query.Filter) bool {
-		return resources.DefaultObjectMetaFilter(workspace.(*tenantv1alpha1.Workspace).ObjectMeta, filter)
+		return resources.DefaultObjectMetaFilter(workspace.(*tenantv1alpha2.WorkspaceTemplate).ObjectMeta, filter)
 	})
 
 	return result, nil
 }
 
 func (t *tenantOperator) ListNamespaces(user user.Info, workspace string, queryParam *query.Query) (*api.ListResult, error) {
+	nsScope := request.ClusterScope
+	if workspace != "" {
+		nsScope = request.WorkspaceScope
+	}
 
-	listNSInWS := authorizer.AttributesRecord{
+	listNS := authorizer.AttributesRecord{
 		User:            user,
 		Verb:            "list",
-		APIGroup:        "",
-		APIVersion:      "v1",
 		Workspace:       workspace,
 		Resource:        "namespaces",
 		ResourceRequest: true,
+		ResourceScope:   nsScope,
 	}
 
-	decision, _, err := t.authorizer.Authorize(listNSInWS)
+	decision, _, err := t.authorizer.Authorize(listNS)
 
 	if err != nil {
 		klog.Error(err)
@@ -177,7 +195,9 @@ func (t *tenantOperator) ListNamespaces(user user.Info, workspace string, queryP
 
 	if decision == authorizer.DecisionAllow {
 
-		queryParam.Filters[query.FieldLabel] = query.Value(fmt.Sprintf("%s=%s", tenantv1alpha1.WorkspaceLabel, workspace))
+		if workspace != "" {
+			queryParam.Filters[query.FieldLabel] = query.Value(fmt.Sprintf("%s=%s", tenantv1alpha1.WorkspaceLabel, workspace))
+		}
 
 		result, err := t.resourceGetter.List("namespaces", "", queryParam)
 
@@ -207,7 +227,7 @@ func (t *tenantOperator) ListNamespaces(user user.Info, workspace string, queryP
 		}
 
 		// skip if not controlled by the specified workspace
-		if ns := namespace.(*corev1.Namespace); ns.Labels[tenantv1alpha1.WorkspaceLabel] != workspace {
+		if ns := namespace.(*corev1.Namespace); workspace != "" && ns.Labels[tenantv1alpha1.WorkspaceLabel] != workspace {
 			continue
 		}
 
@@ -220,8 +240,10 @@ func (t *tenantOperator) ListNamespaces(user user.Info, workspace string, queryP
 		return resources.DefaultObjectMetaCompare(left.(*corev1.Namespace).ObjectMeta, right.(*corev1.Namespace).ObjectMeta, field)
 	}, func(object runtime.Object, filter query.Filter) bool {
 		namespace := object.(*corev1.Namespace).ObjectMeta
-		if workspaceLabel, ok := namespace.Labels[tenantv1alpha1.WorkspaceLabel]; !ok || workspaceLabel != workspace {
-			return false
+		if workspace != "" {
+			if workspaceLabel, ok := namespace.Labels[tenantv1alpha1.WorkspaceLabel]; !ok || workspaceLabel != workspace {
+				return false
+			}
 		}
 		return resources.DefaultObjectMetaFilter(namespace, filter)
 	})
@@ -229,21 +251,81 @@ func (t *tenantOperator) ListNamespaces(user user.Info, workspace string, queryP
 	return result, nil
 }
 
+// CreateNamespace adds a workspace label to namespace which indicates namespace is under the workspace
+// The reason here why don't check the existence of workspace anymore is this function is only executed in host cluster.
+// but if the host cluster is not authorized to workspace, there will be no workspace in host cluster.
 func (t *tenantOperator) CreateNamespace(workspace string, namespace *corev1.Namespace) (*corev1.Namespace, error) {
+	return t.k8sclient.CoreV1().Namespaces().Create(labelNamespaceWithWorkspaceName(namespace, workspace))
+}
 
-	_, err := t.resourceGetter.Get(tenantv1alpha1.ResourcePluralWorkspace, "", workspace)
+// labelNamespaceWithWorkspaceName adds a kubesphere.io/workspace=[workspaceName] label to namespace which
+// indicates namespace is under the workspace
+func labelNamespaceWithWorkspaceName(namespace *corev1.Namespace, workspaceName string) *corev1.Namespace {
+	if namespace.Labels == nil {
+		namespace.Labels = make(map[string]string, 0)
+	}
 
+	namespace.Labels[tenantv1alpha1.WorkspaceLabel] = workspaceName // label namespace with workspace name
+
+	return namespace
+}
+
+func (t *tenantOperator) DescribeNamespace(workspace, namespace string) (*corev1.Namespace, error) {
+	obj, err := t.resourceGetter.Get("namespaces", "", namespace)
 	if err != nil {
 		return nil, err
 	}
-
-	if namespace.Annotations == nil {
-		namespace.Annotations = make(map[string]string, 0)
+	ns := obj.(*corev1.Namespace)
+	if ns.Labels[tenantv1alpha1.WorkspaceLabel] != workspace {
+		err := errors.NewNotFound(corev1.Resource("namespace"), namespace)
+		klog.Error(err)
+		return nil, err
 	}
+	return ns, nil
+}
 
-	namespace.Annotations[tenantv1alpha1.WorkspaceLabel] = workspace
+func (t *tenantOperator) DeleteNamespace(workspace, namespace string) error {
+	_, err := t.DescribeNamespace(workspace, namespace)
+	if err != nil {
+		return err
+	}
+	return t.k8sclient.CoreV1().Namespaces().Delete(namespace, metav1.NewDeleteOptions(0))
+}
 
-	return t.k8sclient.CoreV1().Namespaces().Create(namespace)
+func (t *tenantOperator) UpdateNamespace(workspace string, namespace *corev1.Namespace) (*corev1.Namespace, error) {
+	_, err := t.DescribeNamespace(workspace, namespace.Name)
+	if err != nil {
+		return nil, err
+	}
+	namespace = labelNamespaceWithWorkspaceName(namespace, workspace)
+	return t.k8sclient.CoreV1().Namespaces().Update(namespace)
+}
+
+func (t *tenantOperator) PatchNamespace(workspace string, namespace *corev1.Namespace) (*corev1.Namespace, error) {
+	_, err := t.DescribeNamespace(workspace, namespace.Name)
+	if err != nil {
+		return nil, err
+	}
+	if namespace.Labels != nil {
+		namespace.Labels[tenantv1alpha1.WorkspaceLabel] = workspace
+	}
+	data, err := json.Marshal(namespace)
+	if err != nil {
+		return nil, err
+	}
+	return t.k8sclient.CoreV1().Namespaces().Patch(namespace.Name, types.MergePatchType, data)
+}
+
+func (t *tenantOperator) PatchWorkspace(workspace *tenantv1alpha2.WorkspaceTemplate) (*tenantv1alpha2.WorkspaceTemplate, error) {
+	_, err := t.DescribeWorkspace(workspace.Name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := json.Marshal(workspace)
+	if err != nil {
+		return nil, err
+	}
+	return t.ksclient.TenantV1alpha2().WorkspaceTemplates().Patch(workspace.Name, types.MergePatchType, data)
 }
 
 func (t *tenantOperator) CreateWorkspace(workspace *tenantv1alpha2.WorkspaceTemplate) (*tenantv1alpha2.WorkspaceTemplate, error) {
@@ -268,20 +350,124 @@ func (t *tenantOperator) ListWorkspaceClusters(workspaceName string) (*api.ListR
 		klog.Error(err)
 		return nil, err
 	}
-	clusters := make([]interface{}, 0)
-	for _, cluster := range workspace.Spec.Clusters {
-		obj, err := t.resourceGetter.Get(clusterv1alpha1.ResourcesPluralCluster, "", cluster)
+
+	// In this case, spec.placement.clusterSelector will be ignored, since spec.placement.clusters is provided.
+	if workspace.Spec.Placement.Clusters != nil {
+		clusters := make([]interface{}, 0)
+		for _, cluster := range workspace.Spec.Placement.Clusters {
+			obj, err := t.resourceGetter.Get(clusterv1alpha1.ResourcesPluralCluster, "", cluster.Name)
+			if err != nil {
+				klog.Error(err)
+				if errors.IsNotFound(err) {
+					continue
+				}
+				return nil, err
+			}
+			clusters = append(clusters, obj)
+		}
+		return &api.ListResult{Items: clusters, TotalItems: len(clusters)}, nil
+	}
+
+	if workspace.Spec.Placement.ClusterSelector != nil {
+		// In this case, the resource will be propagated to all member clusters.
+		if workspace.Spec.Placement.ClusterSelector.MatchLabels == nil {
+			return t.resourceGetter.List(clusterv1alpha1.ResourcesPluralCluster, "", query.New())
+		} else {
+			// In this case, the resource will only be propagated to member clusters that are labeled with foo: bar.
+			return t.resourceGetter.List(clusterv1alpha1.ResourcesPluralCluster, "", &query.Query{
+				Pagination:    query.NoPagination,
+				Ascending:     false,
+				LabelSelector: labels.SelectorFromSet(workspace.Spec.Placement.ClusterSelector.MatchLabels).String(),
+			})
+		}
+	}
+
+	// In this case, you can either set spec: {} as above or remove spec field from your placement policy. The resource will not be propagated to member clusters.
+	return &api.ListResult{Items: []interface{}{}, TotalItems: 0}, nil
+}
+func (t *tenantOperator) ListClusters(user user.Info) (*api.ListResult, error) {
+
+	listClustersInGlobalScope := authorizer.AttributesRecord{
+		User:            user,
+		Verb:            "list",
+		Resource:        "clusters",
+		ResourceScope:   request.GlobalScope,
+		ResourceRequest: true,
+	}
+
+	allowedListClustersInGlobalScope, _, err := t.authorizer.Authorize(listClustersInGlobalScope)
+
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+
+	listWorkspacesInGlobalScope := authorizer.AttributesRecord{
+		User:            user,
+		Verb:            "list",
+		Resource:        "workspaces",
+		ResourceScope:   request.GlobalScope,
+		ResourceRequest: true,
+	}
+
+	allowedListWorkspacesInGlobalScope, _, err := t.authorizer.Authorize(listWorkspacesInGlobalScope)
+
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+
+	if allowedListClustersInGlobalScope == authorizer.DecisionAllow ||
+		allowedListWorkspacesInGlobalScope == authorizer.DecisionAllow {
+		result, err := t.resourceGetter.List(clusterv1alpha1.ResourcesPluralCluster, "", query.New())
 		if err != nil {
 			klog.Error(err)
-			if errors.IsNotFound(err) {
-				continue
-			}
 			return nil, err
 		}
-		cluster := obj.(*clusterv1alpha1.Cluster)
-		clusters = append(clusters, cluster)
+		return result, nil
 	}
-	return &api.ListResult{Items: clusters, TotalItems: len(clusters)}, nil
+
+	workspaceRoleBindings, err := t.am.ListWorkspaceRoleBindings(user.GetName(), "")
+
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+
+	clusters := map[string]*clusterv1alpha1.Cluster{}
+
+	for _, roleBinding := range workspaceRoleBindings {
+		workspaceName := roleBinding.Labels[tenantv1alpha1.WorkspaceLabel]
+		workspace, err := t.DescribeWorkspace(workspaceName)
+		if err != nil {
+			klog.Error(err)
+			return nil, err
+		}
+
+		for _, grantedCluster := range workspace.Spec.Placement.Clusters {
+			// skip if cluster exist
+			if clusters[grantedCluster.Name] != nil {
+				continue
+			}
+			obj, err := t.resourceGetter.Get(clusterv1alpha1.ResourcesPluralCluster, "", grantedCluster.Name)
+			if err != nil {
+				klog.Error(err)
+				if errors.IsNotFound(err) {
+					continue
+				}
+				return nil, err
+			}
+			cluster := obj.(*clusterv1alpha1.Cluster)
+			clusters[cluster.Name] = cluster
+		}
+	}
+
+	items := make([]interface{}, 0)
+	for _, cluster := range clusters {
+		items = append(items, cluster)
+	}
+
+	return &api.ListResult{Items: items, TotalItems: len(items)}, nil
 }
 
 func (t *tenantOperator) DeleteWorkspace(workspace string) error {
@@ -302,41 +488,39 @@ func (t *tenantOperator) listIntersectedNamespaces(user user.Info,
 
 		iNamespaces []*corev1.Namespace
 	)
-
 	includeNsWithoutWs := len(workspaceSet) == 0 && len(workspaceSubstrs) == 0
 
-	roleBindings, err := t.am.ListRoleBindings(user.GetName(), "")
+	result, err := t.ListNamespaces(user, "", query.New())
 	if err != nil {
 		return nil, err
 	}
-	for _, rb := range roleBindings {
-		if len(namespaceSet) > 0 {
-			if _, ok := namespaceSet[rb.Namespace]; !ok {
-				continue
-			}
-		}
-		if len(namespaceSubstrs) > 0 && !stringContains(rb.Namespace, namespaceSubstrs) {
+	for _, obj := range result.Items {
+		ns, ok := obj.(*corev1.Namespace)
+		if !ok {
 			continue
 		}
-		ns, err := t.resourceGetter.Get("namespaces", "", rb.Namespace)
-		if err != nil {
-			return nil, err
-		}
-		if ns, ok := ns.(*corev1.Namespace); ok {
-			if ws := ns.Labels[tenantv1alpha1.WorkspaceLabel]; ws != "" {
-				if len(workspaceSet) > 0 {
-					if _, ok := workspaceSet[ws]; !ok {
-						continue
-					}
-				}
-				if len(workspaceSubstrs) > 0 && !stringContains(ws, workspaceSubstrs) {
-					continue
-				}
-			} else if !includeNsWithoutWs {
+
+		if len(namespaceSet) > 0 {
+			if _, ok := namespaceSet[ns.Name]; !ok {
 				continue
 			}
-			iNamespaces = append(iNamespaces, ns)
 		}
+		if len(namespaceSubstrs) > 0 && !stringContains(ns.Name, namespaceSubstrs) {
+			continue
+		}
+		if ws := ns.Labels[tenantv1alpha1.WorkspaceLabel]; ws != "" {
+			if len(workspaceSet) > 0 {
+				if _, ok := workspaceSet[ws]; !ok {
+					continue
+				}
+			}
+			if len(workspaceSubstrs) > 0 && !stringContains(ws, workspaceSubstrs) {
+				continue
+			}
+		} else if !includeNsWithoutWs {
+			continue
+		}
+		iNamespaces = append(iNamespaces, ns)
 	}
 	return iNamespaces, nil
 }
@@ -363,6 +547,7 @@ func (t *tenantOperator) Events(user user.Info, queryParam *eventsv1alpha1.Query
 			Namespace:       ns.Name,
 			Resource:        "events",
 			ResourceRequest: true,
+			ResourceScope:   request.NamespaceScope,
 		}
 		decision, _, err := t.authorizer.Authorize(listEvts)
 		if err != nil {
@@ -384,6 +569,7 @@ func (t *tenantOperator) Events(user user.Info, queryParam *eventsv1alpha1.Query
 			APIVersion:      "v1",
 			Resource:        "events",
 			ResourceRequest: true,
+			ResourceScope:   request.ClusterScope,
 		}
 		decision, _, err := t.authorizer.Authorize(listEvts)
 		if err != nil {
@@ -422,6 +608,7 @@ func (t *tenantOperator) QueryLogs(user user.Info, query *loggingv1alpha2.Query)
 			Resource:        "pods",
 			Subresource:     "log",
 			ResourceRequest: true,
+			ResourceScope:   request.NamespaceScope,
 		}
 		decision, _, err := t.authorizer.Authorize(podLogs)
 		if err != nil {
@@ -492,6 +679,7 @@ func (t *tenantOperator) ExportLogs(user user.Info, query *loggingv1alpha2.Query
 			Resource:        "pods",
 			Subresource:     "log",
 			ResourceRequest: true,
+			ResourceScope:   request.NamespaceScope,
 		}
 		decision, _, err := t.authorizer.Authorize(podLogs)
 		if err != nil {
@@ -521,6 +709,47 @@ func (t *tenantOperator) ExportLogs(user user.Info, query *loggingv1alpha2.Query
 	} else {
 		return t.lo.ExportLogs(sf, writer)
 	}
+}
+
+func (t *tenantOperator) Auditing(user user.Info, queryParam *auditingv1alpha1.Query) (*auditingv1alpha1.APIResponse, error) {
+	iNamespaces, err := t.listIntersectedNamespaces(user,
+		stringutils.Split(queryParam.WorkspaceFilter, ","),
+		stringutils.Split(queryParam.WorkspaceSearch, ","),
+		stringutils.Split(queryParam.ObjectRefNamespaceFilter, ","),
+		stringutils.Split(queryParam.ObjectRefNamespaceSearch, ","))
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+
+	namespaceCreateTimeMap := make(map[string]time.Time)
+	for _, ns := range iNamespaces {
+		namespaceCreateTimeMap[ns.Name] = ns.CreationTimestamp.Time
+	}
+	// If there are no ns and ws query conditions,
+	// those events with empty `ObjectRef.Namespace` will also be listed when user can list all namespaces
+	if len(queryParam.WorkspaceFilter) == 0 && len(queryParam.ObjectRefNamespaceFilter) == 0 &&
+		len(queryParam.WorkspaceSearch) == 0 && len(queryParam.ObjectRefNamespaceSearch) == 0 {
+		listNs := authorizer.AttributesRecord{
+			User:            user,
+			Verb:            "list",
+			Resource:        "namespaces",
+			ResourceRequest: true,
+			ResourceScope:   request.ClusterScope,
+		}
+		decision, _, err := t.authorizer.Authorize(listNs)
+		if err != nil {
+			klog.Error(err)
+			return nil, err
+		}
+		if decision == authorizer.DecisionAllow {
+			namespaceCreateTimeMap[""] = time.Time{}
+		}
+	}
+
+	return t.auditing.Events(queryParam, func(filter *auditingclient.Filter) {
+		filter.ObjectRefNamespaceMap = namespaceCreateTimeMap
+	})
 }
 
 func contains(objects []runtime.Object, object runtime.Object) bool {

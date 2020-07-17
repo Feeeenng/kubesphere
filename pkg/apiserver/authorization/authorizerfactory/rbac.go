@@ -78,7 +78,7 @@ type ruleAccumulator struct {
 	errors []error
 }
 
-func (r *ruleAccumulator) visit(source fmt.Stringer, _ string, rule *rbacv1.PolicyRule, err error) bool {
+func (r *ruleAccumulator) visit(_ fmt.Stringer, _ string, rule *rbacv1.PolicyRule, err error) bool {
 	if rule != nil {
 		r.rules = append(r.rules, *rule)
 	}
@@ -131,8 +131,8 @@ func (r *RBACAuthorizer) Authorize(requestAttributes authorizer.Attributes) (aut
 			scope = fmt.Sprintf("in namespace %q", ns)
 		} else if ws := requestAttributes.GetWorkspace(); len(ws) > 0 {
 			scope = fmt.Sprintf("in workspace %q", ws)
-		} else if cluster := requestAttributes.GetWorkspace(); len(cluster) > 0 {
-			scope = fmt.Sprintf("in cluster %q", cluster)
+		} else if requestAttributes.GetResourceScope() == request.ClusterScope {
+			scope = "cluster scope"
 		} else {
 			scope = "global-wide"
 		}
@@ -200,6 +200,7 @@ func (r *RBACAuthorizer) rulesFor(requestAttributes authorizer.Attributes) ([]rb
 }
 
 func (r *RBACAuthorizer) visitRulesFor(requestAttributes authorizer.Attributes, visitor func(source fmt.Stringer, regoPolicy string, rule *rbacv1.PolicyRule, err error) bool) {
+
 	if globalRoleBindings, err := r.am.ListGlobalRoleBindings(""); err != nil {
 		if !visitor(nil, "", nil, err) {
 			return
@@ -227,9 +228,27 @@ func (r *RBACAuthorizer) visitRulesFor(requestAttributes authorizer.Attributes, 
 				}
 			}
 		}
+
+		if requestAttributes.GetResourceScope() == request.GlobalScope {
+			return
+		}
 	}
 
-	if requestAttributes.GetResourceScope() == request.WorkspaceScope {
+	if requestAttributes.GetResourceScope() == request.WorkspaceScope || requestAttributes.GetResourceScope() == request.NamespaceScope {
+		var workspace string
+		var err error
+		if requestAttributes.GetResourceScope() == request.NamespaceScope {
+			if workspace, err = r.am.GetControlledWorkspace(requestAttributes.GetNamespace()); err != nil {
+				if !visitor(nil, "", nil, err) {
+					return
+				}
+			}
+		}
+
+		if workspace == "" {
+			workspace = requestAttributes.GetWorkspace()
+		}
+
 		if workspaceRoleBindings, err := r.am.ListWorkspaceRoleBindings("", requestAttributes.GetWorkspace()); err != nil {
 			if !visitor(nil, "", nil, err) {
 				return

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The KubeSphere Authors.
+Copyright 2020 The KubeSphere Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,12 +23,14 @@ import (
 
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
-	v1alpha1 "kubesphere.io/kubesphere/pkg/apis/cluster/v1alpha1"
+	v1alpha1 "kubesphere.io/kubesphere/pkg/apis/auditing/v1alpha1"
+	clusterv1alpha1 "kubesphere.io/kubesphere/pkg/apis/cluster/v1alpha1"
 	devopsv1alpha1 "kubesphere.io/kubesphere/pkg/apis/devops/v1alpha1"
 	v1alpha3 "kubesphere.io/kubesphere/pkg/apis/devops/v1alpha3"
 	v1alpha2 "kubesphere.io/kubesphere/pkg/apis/iam/v1alpha2"
 	networkv1alpha1 "kubesphere.io/kubesphere/pkg/apis/network/v1alpha1"
 	servicemeshv1alpha2 "kubesphere.io/kubesphere/pkg/apis/servicemesh/v1alpha2"
+	storagev1alpha1 "kubesphere.io/kubesphere/pkg/apis/storage/v1alpha1"
 	tenantv1alpha1 "kubesphere.io/kubesphere/pkg/apis/tenant/v1alpha1"
 	tenantv1alpha2 "kubesphere.io/kubesphere/pkg/apis/tenant/v1alpha2"
 )
@@ -59,8 +61,14 @@ func (f *genericInformer) Lister() cache.GenericLister {
 // TODO extend this to unknown resources with a client pool
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
-	// Group=cluster.kubesphere.io, Version=v1alpha1
-	case v1alpha1.SchemeGroupVersion.WithResource("clusters"):
+	// Group=auditing.kubesphere.io, Version=v1alpha1
+	case v1alpha1.SchemeGroupVersion.WithResource("rules"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Auditing().V1alpha1().Rules().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("webhooks"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Auditing().V1alpha1().Webhooks().Informer()}, nil
+
+		// Group=cluster.kubesphere.io, Version=v1alpha1
+	case clusterv1alpha1.SchemeGroupVersion.WithResource("clusters"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Cluster().V1alpha1().Clusters().Informer()}, nil
 
 		// Group=devops.kubesphere.io, Version=v1alpha1
@@ -84,6 +92,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Iam().V1alpha2().GlobalRoles().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("globalrolebindings"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Iam().V1alpha2().GlobalRoleBindings().Informer()}, nil
+	case v1alpha2.SchemeGroupVersion.WithResource("rolebases"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Iam().V1alpha2().RoleBases().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("users"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Iam().V1alpha2().Users().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("workspaceroles"):
@@ -100,6 +110,12 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Servicemesh().V1alpha2().ServicePolicies().Informer()}, nil
 	case servicemeshv1alpha2.SchemeGroupVersion.WithResource("strategies"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Servicemesh().V1alpha2().Strategies().Informer()}, nil
+
+		// Group=storage.kubesphere.io, Version=v1alpha1
+	case storagev1alpha1.SchemeGroupVersion.WithResource("provisionercapabilities"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Storage().V1alpha1().ProvisionerCapabilities().Informer()}, nil
+	case storagev1alpha1.SchemeGroupVersion.WithResource("storageclasscapabilities"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Storage().V1alpha1().StorageClassCapabilities().Informer()}, nil
 
 		// Group=tenant.kubesphere.io, Version=v1alpha1
 	case tenantv1alpha1.SchemeGroupVersion.WithResource("workspaces"):

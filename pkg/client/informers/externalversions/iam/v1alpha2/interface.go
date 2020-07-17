@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The KubeSphere Authors.
+Copyright 2020 The KubeSphere Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +28,8 @@ type Interface interface {
 	GlobalRoles() GlobalRoleInformer
 	// GlobalRoleBindings returns a GlobalRoleBindingInformer.
 	GlobalRoleBindings() GlobalRoleBindingInformer
+	// RoleBases returns a RoleBaseInformer.
+	RoleBases() RoleBaseInformer
 	// Users returns a UserInformer.
 	Users() UserInformer
 	// WorkspaceRoles returns a WorkspaceRoleInformer.
@@ -55,6 +57,11 @@ func (v *version) GlobalRoles() GlobalRoleInformer {
 // GlobalRoleBindings returns a GlobalRoleBindingInformer.
 func (v *version) GlobalRoleBindings() GlobalRoleBindingInformer {
 	return &globalRoleBindingInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// RoleBases returns a RoleBaseInformer.
+func (v *version) RoleBases() RoleBaseInformer {
+	return &roleBaseInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // Users returns a UserInformer.

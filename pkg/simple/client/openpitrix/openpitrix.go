@@ -1,6 +1,6 @@
 /*
 
- Copyright 2019 The KubeSphere Authors.
+ Copyright 2020 The KubeSphere Authors.
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ package openpitrix
 import (
 	"context"
 	"fmt"
+	"github.com/golang/protobuf/ptypes/wrappers"
 	"k8s.io/klog"
 	"openpitrix.io/openpitrix/pkg/manager"
 	"openpitrix.io/openpitrix/pkg/pb"
@@ -48,6 +49,12 @@ type Client interface {
 	pb.CategoryManagerClient
 	pb.AttachmentManagerClient
 	pb.RepoIndexerClient
+	// upsert the openpitrix runtime when cluster is updated or created
+	UpsertRuntime(cluster string, kubeConfig string) error
+	// clean up the openpitrix runtime when cluster is deleted
+	CleanupRuntime(cluster string) error
+	// migrate the openpitrix runtime when upgrade ks2.x to ks3.x
+	MigrateRuntime(runtimeId string, cluster string) error
 }
 
 type client struct {
@@ -58,6 +65,48 @@ type client struct {
 	pb.CategoryManagerClient
 	pb.AttachmentManagerClient
 	pb.RepoIndexerClient
+}
+
+func (c *client) UpsertRuntime(cluster string, kubeConfig string) error {
+	ctx := SystemContext()
+	req := &pb.CreateRuntimeCredentialRequest{
+		Name:                     &wrappers.StringValue{Value: fmt.Sprintf("kubeconfig-%s", cluster)},
+		Provider:                 &wrappers.StringValue{Value: KubernetesProvider},
+		Description:              &wrappers.StringValue{Value: "kubeconfig"},
+		RuntimeUrl:               &wrappers.StringValue{Value: "kubesphere"},
+		RuntimeCredentialContent: &wrappers.StringValue{Value: kubeConfig},
+		RuntimeCredentialId:      &wrappers.StringValue{Value: cluster},
+	}
+	_, err := c.CreateRuntimeCredential(ctx, req)
+	if err != nil {
+		return err
+	}
+	_, err = c.CreateRuntime(ctx, &pb.CreateRuntimeRequest{
+		Name:                &wrappers.StringValue{Value: cluster},
+		RuntimeCredentialId: &wrappers.StringValue{Value: cluster},
+		Provider:            &wrappers.StringValue{Value: KubernetesProvider},
+		Zone:                &wrappers.StringValue{Value: cluster},
+		RuntimeId:           &wrappers.StringValue{Value: cluster},
+	})
+
+	return err
+}
+
+func (c *client) CleanupRuntime(cluster string) error {
+	ctx := SystemContext()
+	_, err := c.DeleteClusterInRuntime(ctx, &pb.DeleteClusterInRuntimeRequest{
+		RuntimeId: []string{cluster},
+	})
+	return err
+}
+
+func (c *client) MigrateRuntime(runtimeId string, cluster string) error {
+	ctx := SystemContext()
+	_, err := c.MigrateClusterInRuntime(ctx, &pb.MigrateClusterInRuntimeRequest{
+		FromRuntimeId: runtimeId,
+		ToRuntimeId:   cluster,
+	})
+	return err
 }
 
 func parseToHostPort(endpoint string) (string, int, error) {
@@ -74,7 +123,15 @@ func parseToHostPort(endpoint string) (string, int, error) {
 }
 
 func newRuntimeManagerClient(endpoint string) (pb.RuntimeManagerClient, error) {
+	if len(endpoint) == 0 {
+		return nil, nil
+	}
+
 	host, port, err := parseToHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
+
 	conn, err := manager.NewClient(host, port)
 	if err != nil {
 		return nil, err
@@ -82,7 +139,14 @@ func newRuntimeManagerClient(endpoint string) (pb.RuntimeManagerClient, error) {
 	return pb.NewRuntimeManagerClient(conn), nil
 }
 func newClusterManagerClient(endpoint string) (pb.ClusterManagerClient, error) {
+	if len(endpoint) == 0 {
+		return nil, nil
+	}
+
 	host, port, err := parseToHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := manager.NewClient(host, port)
 	if err != nil {
 		return nil, err
@@ -90,7 +154,14 @@ func newClusterManagerClient(endpoint string) (pb.ClusterManagerClient, error) {
 	return pb.NewClusterManagerClient(conn), nil
 }
 func newCategoryManagerClient(endpoint string) (pb.CategoryManagerClient, error) {
+	if len(endpoint) == 0 {
+		return nil, nil
+	}
+
 	host, port, err := parseToHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := manager.NewClient(host, port)
 	if err != nil {
 		return nil, err
@@ -99,7 +170,14 @@ func newCategoryManagerClient(endpoint string) (pb.CategoryManagerClient, error)
 }
 
 func newAttachmentManagerClient(endpoint string) (pb.AttachmentManagerClient, error) {
+	if len(endpoint) == 0 {
+		return nil, nil
+	}
+
 	host, port, err := parseToHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := manager.NewClient(host, port)
 	if err != nil {
 		return nil, err
@@ -108,7 +186,14 @@ func newAttachmentManagerClient(endpoint string) (pb.AttachmentManagerClient, er
 }
 
 func newRepoManagerClient(endpoint string) (pb.RepoManagerClient, error) {
+	if len(endpoint) == 0 {
+		return nil, nil
+	}
+
 	host, port, err := parseToHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := manager.NewClient(host, port)
 	if err != nil {
 		return nil, err
@@ -117,7 +202,14 @@ func newRepoManagerClient(endpoint string) (pb.RepoManagerClient, error) {
 }
 
 func newRepoIndexer(endpoint string) (pb.RepoIndexerClient, error) {
+	if len(endpoint) == 0 {
+		return nil, nil
+	}
+
 	host, port, err := parseToHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := manager.NewClient(host, port)
 	if err != nil {
 		return nil, err
@@ -126,7 +218,14 @@ func newRepoIndexer(endpoint string) (pb.RepoIndexerClient, error) {
 }
 
 func newAppManagerClient(endpoint string) (pb.AppManagerClient, error) {
+	if len(endpoint) == 0 {
+		return nil, nil
+	}
+
 	host, port, err := parseToHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
 	conn, err := manager.NewClient(host, port)
 	if err != nil {
 		return nil, err
@@ -134,52 +233,49 @@ func newAppManagerClient(endpoint string) (pb.AppManagerClient, error) {
 	return pb.NewAppManagerClient(conn), nil
 }
 
+// will return a nil client and nil error if endpoint is empty
 func NewClient(options *Options) (Client, error) {
+	if options.IsEmpty() {
+		return nil, nil
+	}
 
 	runtimeMangerClient, err := newRuntimeManagerClient(options.RuntimeManagerEndpoint)
-
 	if err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	clusterManagerClient, err := newClusterManagerClient(options.ClusterManagerEndpoint)
-
 	if err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	repoManagerClient, err := newRepoManagerClient(options.RepoManagerEndpoint)
-
 	if err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	repoIndexerClient, err := newRepoIndexer(options.RepoIndexerEndpoint)
-
 	if err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	appManagerClient, err := newAppManagerClient(options.AppManagerEndpoint)
-
 	if err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	categoryManagerClient, err := newCategoryManagerClient(options.CategoryManagerEndpoint)
-
 	if err != nil {
 		klog.Error(err)
 		return nil, err
 	}
 
 	attachmentManagerClient, err := newAttachmentManagerClient(options.AttachmentManagerEndpoint)
-
 	if err != nil {
 		klog.Error(err)
 		return nil, err

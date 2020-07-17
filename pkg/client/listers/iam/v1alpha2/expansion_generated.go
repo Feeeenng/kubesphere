@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The KubeSphere Authors.
+Copyright 2020 The KubeSphere Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,10 @@ type GlobalRoleListerExpansion interface{}
 // GlobalRoleBindingListerExpansion allows custom methods to be added to
 // GlobalRoleBindingLister.
 type GlobalRoleBindingListerExpansion interface{}
+
+// RoleBaseListerExpansion allows custom methods to be added to
+// RoleBaseLister.
+type RoleBaseListerExpansion interface{}
 
 // UserListerExpansion allows custom methods to be added to
 // UserLister.

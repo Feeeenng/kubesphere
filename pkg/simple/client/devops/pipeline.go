@@ -505,6 +505,12 @@ type PipelineBranchItem struct {
 		Issues    []interface{} `json:"issues,omitempty" description:"issues"`
 		URL       string        `json:"url,omitempty" description:"url"`
 	} `json:"branch,omitempty"`
+	PullRequest struct {
+		Author string `json:"author,omitempty" description:"author of pull request"`
+		ID     string `json:"id,omitempty" description:"id of pull request"`
+		Title  string `json:"title,omitempty" description:"title of pull request"`
+		URL    string `json:"url,omitempty" description:"url of pull request"`
+	} `json:"pullRequest,omitempty"`
 }
 
 // RunPipeline
@@ -1107,7 +1113,7 @@ type PipelineOperator interface {
 	// SCM operator interface
 	GetSCMServers(scmId string, httpParameters *HttpParameters) ([]SCMServer, error)
 	GetSCMOrg(scmId string, httpParameters *HttpParameters) ([]SCMOrg, error)
-	GetOrgRepo(scmId, organizationId string, httpParameters *HttpParameters) ([]OrgRepo, error)
+	GetOrgRepo(scmId, organizationId string, httpParameters *HttpParameters) (OrgRepo, error)
 	CreateSCMServers(scmId string, httpParameters *HttpParameters) (*SCMServer, error)
 	Validate(scmId string, httpParameters *HttpParameters) (*Validates, error)
 

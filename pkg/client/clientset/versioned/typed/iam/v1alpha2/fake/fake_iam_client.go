@@ -1,5 +1,5 @@
 /*
-Copyright 2019 The KubeSphere Authors.
+Copyright 2020 The KubeSphere Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,6 +34,10 @@ func (c *FakeIamV1alpha2) GlobalRoles() v1alpha2.GlobalRoleInterface {
 
 func (c *FakeIamV1alpha2) GlobalRoleBindings() v1alpha2.GlobalRoleBindingInterface {
 	return &FakeGlobalRoleBindings{c}
+}
+
+func (c *FakeIamV1alpha2) RoleBases() v1alpha2.RoleBaseInterface {
+	return &FakeRoleBases{c}
 }
 
 func (c *FakeIamV1alpha2) Users() v1alpha2.UserInterface {

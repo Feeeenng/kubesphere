@@ -89,9 +89,10 @@ spec:
         - --name=gondor
         - --token=randomtoken
         - --proxy-server=http://139.198.121.121:8080
-        - --keepalive=30s
+        - --keepalive=10s
         - --kubesphere-service=ks-apiserver.kubesphere-system.svc:80
         - --kubernetes-service=kubernetes.default.svc:443
+        - --v=0
         image: kubesphere/tower:v1.0
         name: agent
         resources:
@@ -141,7 +142,7 @@ func TestGeranteAgentDeployment(t *testing.T) {
 	for _, testCase := range testCases {
 
 		t.Run(testCase.description, func(t *testing.T) {
-			h := NewHandler(informersFactory.KubernetesSharedInformerFactory().Core().V1().Services().Lister(),
+			h := newHandler(informersFactory.KubernetesSharedInformerFactory().Core().V1().Services().Lister(),
 				informersFactory.KubeSphereSharedInformerFactory().Cluster().V1alpha1().Clusters().Lister(),
 				proxyService,
 				"",
@@ -214,6 +215,20 @@ users:
 `
 
 func TestValidateKubeConfig(t *testing.T) {
+	k8sclient := k8sfake.NewSimpleClientset(service)
+	ksclient := fake.NewSimpleClientset(cluster)
+
+	informersFactory := informers.NewInformerFactories(k8sclient, ksclient, nil, nil, nil, nil)
+
+	informersFactory.KubernetesSharedInformerFactory().Core().V1().Services().Informer().GetIndexer().Add(service)
+	informersFactory.KubeSphereSharedInformerFactory().Cluster().V1alpha1().Clusters().Informer().GetIndexer().Add(cluster)
+
+	h := newHandler(informersFactory.KubernetesSharedInformerFactory().Core().V1().Services().Lister(),
+		informersFactory.KubeSphereSharedInformerFactory().Cluster().V1alpha1().Clusters().Lister(),
+		proxyService,
+		"",
+		agentImage)
+
 	config, err := loadKubeConfigFromBytes([]byte(base64EncodedKubeConfig))
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +261,7 @@ func TestValidateKubeConfig(t *testing.T) {
 		_ = env.Stop()
 	}()
 
-	err = validateKubeConfig([]byte(base64EncodedKubeConfig))
+	err = h.validateKubeConfig([]byte(base64EncodedKubeConfig))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +278,7 @@ func TestValidateKubeSphereEndpoint(t *testing.T) {
 	svr := httptest.NewServer(http.HandlerFunc(endpoint))
 	defer svr.Close()
 
-	got, err := validateKubeSphereAPIServer(svr.URL)
+	got, err := validateKubeSphereAPIServer(svr.URL, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

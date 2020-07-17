@@ -19,6 +19,7 @@ package v1alpha2
 import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 const (
@@ -64,8 +65,9 @@ const (
 	ScopeWorkspace                        = "workspace"
 	ScopeCluster                          = "cluster"
 	ScopeNamespace                        = "namespace"
-	LocalCluster                          = "local"
-	GlobalAdmin                           = "global-admin"
+	PlatformAdmin                         = "platform-admin"
+	NamespaceAdmin                        = "admin"
+	WorkspaceAdminFormat                  = "%s-admin"
 	ClusterAdmin                          = "cluster-admin"
 )
 
@@ -283,4 +285,24 @@ type WorkspaceRoleBindingList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []WorkspaceRoleBinding `json:"items"`
+}
+
+// +genclient
+// +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+// +kubebuilder:resource:categories="iam",scope="Cluster"
+type RoleBase struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Role runtime.RawExtension `json:"role"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// RoleBaseList contains a list of RoleBase
+type RoleBaseList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []RoleBase `json:"items"`
 }

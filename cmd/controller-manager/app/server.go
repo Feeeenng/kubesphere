@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/spf13/cobra"
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/tools/leaderelection"
@@ -36,17 +36,18 @@ import (
 	"kubesphere.io/kubesphere/pkg/controller/network/nsnetworkpolicy"
 	"kubesphere.io/kubesphere/pkg/controller/user"
 	"kubesphere.io/kubesphere/pkg/controller/workspace"
-	"kubesphere.io/kubesphere/pkg/simple/client/openpitrix"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
-
 	"kubesphere.io/kubesphere/pkg/informers"
+	"kubesphere.io/kubesphere/pkg/simple/client/devops"
 	"kubesphere.io/kubesphere/pkg/simple/client/devops/jenkins"
 	"kubesphere.io/kubesphere/pkg/simple/client/k8s"
+	ldapclient "kubesphere.io/kubesphere/pkg/simple/client/ldap"
+	"kubesphere.io/kubesphere/pkg/simple/client/openpitrix"
 	"kubesphere.io/kubesphere/pkg/simple/client/s3"
 	"kubesphere.io/kubesphere/pkg/utils/term"
 	"os"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/runtime/signals"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 func NewControllerManagerCommand() *cobra.Command {
@@ -58,8 +59,11 @@ func NewControllerManagerCommand() *cobra.Command {
 			KubernetesOptions:   conf.KubernetesOptions,
 			DevopsOptions:       conf.DevopsOptions,
 			S3Options:           conf.S3Options,
+			LdapOptions:         conf.LdapOptions,
 			OpenPitrixOptions:   conf.OpenPitrixOptions,
+			NetworkOptions:      conf.NetworkOptions,
 			MultiClusterOptions: conf.MultiClusterOptions,
+			ServiceMeshOptions:  conf.ServiceMeshOptions,
 			LeaderElection:      s.LeaderElection,
 			LeaderElect:         s.LeaderElect,
 		}
@@ -78,6 +82,7 @@ func NewControllerManagerCommand() *cobra.Command {
 				os.Exit(1)
 			}
 		},
+		SilenceUsage: true,
 	}
 
 	fs := cmd.Flags()
@@ -103,30 +108,56 @@ func Run(s *options.KubeSphereControllerManagerOptions, stopCh <-chan struct{}) 
 		return err
 	}
 
-	openpitrixClient, err := openpitrix.NewClient(s.OpenPitrixOptions)
-	if err != nil {
-		klog.Errorf("Failed to create openpitrix client %v", err)
-		return err
+	var devopsClient devops.Interface
+	if s.DevopsOptions != nil && len(s.DevopsOptions.Host) != 0 {
+		devopsClient, err = jenkins.NewDevopsClient(s.DevopsOptions)
+		if err != nil {
+			return fmt.Errorf("failed to connect jenkins, please check jenkins status, error: %v", err)
+		}
 	}
 
-	devopsClient, err := jenkins.NewDevopsClient(s.DevopsOptions)
-	if err != nil {
-		klog.Errorf("Failed to create devops client %v", err)
-		return err
+	var ldapClient ldapclient.Interface
+	if s.LdapOptions == nil || len(s.LdapOptions.Host) == 0 {
+		return fmt.Errorf("ldap service address MUST not be empty")
+	} else {
+		if s.LdapOptions.Host == ldapclient.FAKE_HOST { // for debug only
+			ldapClient = ldapclient.NewSimpleLdap()
+		} else {
+			ldapClient, err = ldapclient.NewLdapClient(s.LdapOptions, stopCh)
+			if err != nil {
+				return fmt.Errorf("failed to connect to ldap service, please check ldap status, error: %v", err)
+			}
+		}
 	}
 
-	s3Client, err := s3.NewS3Client(s.S3Options)
-	if err != nil {
-		klog.Errorf("Failed to create s3 client %v", err)
-		return err
+	var openpitrixClient openpitrix.Client
+	if s.OpenPitrixOptions != nil && !s.OpenPitrixOptions.IsEmpty() {
+		openpitrixClient, err = openpitrix.NewClient(s.OpenPitrixOptions)
+		if err != nil {
+			return fmt.Errorf("failed to connect to openpitrix, please check openpitrix status, error: %v", err)
+		}
 	}
 
-	informerFactory := informers.NewInformerFactories(kubernetesClient.Kubernetes(), kubernetesClient.KubeSphere(),
-		kubernetesClient.Istio(), kubernetesClient.Application(), kubernetesClient.Snapshot(), kubernetesClient.ApiExtensions())
+	var s3Client s3.Interface
+	if s.S3Options != nil && len(s.S3Options.Endpoint) != 0 {
+		s3Client, err = s3.NewS3Client(s.S3Options)
+		if err != nil {
+			return fmt.Errorf("failed to connect to s3, please check s3 service status, error: %v", err)
+		}
+	}
+
+	informerFactory := informers.NewInformerFactories(
+		kubernetesClient.Kubernetes(),
+		kubernetesClient.KubeSphere(),
+		kubernetesClient.Istio(),
+		kubernetesClient.Application(),
+		kubernetesClient.Snapshot(),
+		kubernetesClient.ApiExtensions())
 
 	run := func(ctx context.Context) {
 		klog.V(0).Info("setting up manager")
-		mgr, err := manager.New(kubernetesClient.Config(), manager.Options{})
+		// Use 8443 instead of 443 cause we need root permission to bind port 443
+		mgr, err := manager.New(kubernetesClient.Config(), manager.Options{CertDir: s.WebhookCertDir, Port: 8443})
 		if err != nil {
 			klog.Fatalf("unable to set up overall controller manager: %v", err)
 		}
@@ -142,12 +173,15 @@ func Run(s *options.KubeSphereControllerManagerOptions, stopCh <-chan struct{}) 
 			klog.Fatal("Unable to create workspace controller")
 		}
 
-		err = namespace.Add(mgr, openpitrixClient)
+		err = namespace.Add(mgr)
 		if err != nil {
 			klog.Fatal("Unable to create namespace controller")
 		}
 
-		if err := AddControllers(mgr, kubernetesClient, informerFactory, devopsClient, s3Client, stopCh); err != nil {
+		// TODO(jeff): refactor config with CRD
+		servicemeshEnabled := s.ServiceMeshOptions != nil && len(s.ServiceMeshOptions.IstioPilotHost) != 0
+		if err = addControllers(mgr, kubernetesClient, informerFactory, devopsClient, s3Client, ldapClient, openpitrixClient,
+			s.MultiClusterOptions.Enable, s.NetworkOptions.EnableNetworkPolicy, servicemeshEnabled, stopCh); err != nil {
 			klog.Fatalf("unable to register controllers to the manager: %v", err)
 		}
 
@@ -160,7 +194,7 @@ func Run(s *options.KubeSphereControllerManagerOptions, stopCh <-chan struct{}) 
 
 		klog.Info("registering webhooks to the webhook server")
 		hookServer.Register("/validate-email-iam-kubesphere-io-v1alpha2-user", &webhook.Admission{Handler: &user.EmailValidator{Client: mgr.GetClient()}})
-		hookServer.Register("/validate-service-nsnp-kubesphere-io-v1alpha1-network", &webhook.Admission{Handler: &nsnetworkpolicy.ServiceValidator{}})
+		hookServer.Register("/validate-nsnp-kubesphere-io-v1alpha1-network", &webhook.Admission{Handler: &nsnetworkpolicy.NSNPValidator{Client: mgr.GetClient()}})
 
 		klog.V(0).Info("Starting the controllers.")
 		if err = mgr.Start(stopCh); err != nil {
@@ -191,9 +225,6 @@ func Run(s *options.KubeSphereControllerManagerOptions, stopCh <-chan struct{}) 
 	// add a uniquifier so that two processes on the same host don't accidentally both become active
 	id = id + "_" + string(uuid.NewUUID())
 
-	// TODO: change lockType to lease
-	// once we finished moving to Kubernetes v1.16+, we
-	// change lockType to lease
 	lock, err := resourcelock.New(resourcelock.LeasesResourceLock,
 		"kubesphere-system",
 		"ks-controller-manager",

@@ -34,6 +34,7 @@ const (
 
 	WorkspaceLabelKey              = "kubesphere.io/workspace"
 	NamespaceLabelKey              = "kubesphere.io/namespace"
+	RuntimeLabelKey                = "openpitrix.io/namespace"
 	DisplayNameAnnotationKey       = "kubesphere.io/alias-name"
 	DescriptionAnnotationKey       = "kubesphere.io/description"
 	CreatorAnnotationKey           = "kubesphere.io/creator"
@@ -48,6 +49,7 @@ const (
 	DevopsOwner                    = "owner"
 	DevopsReporter                 = "reporter"
 	DevOpsProjectLabelKey          = "kubesphere.io/devopsproject"
+	KubefedManagedLabel            = "kubefed.io/managed"
 
 	UserNameHeader = "X-Token-Username"
 
@@ -83,6 +85,7 @@ const (
 	LogQueryTag                = "Log Query"
 	TerminalTag                = "Terminal"
 	EventsQueryTag             = "Events Query"
+	AuditingQueryTag           = "Auditing Query"
 )
 
 var (

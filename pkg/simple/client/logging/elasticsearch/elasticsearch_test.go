@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-func TestDetectVersionMajor(t *testing.T) {
+func TestInitClient(t *testing.T) {
 	var tests = []struct {
 		fakeResp string
 		expected string
@@ -34,12 +34,13 @@ func TestDetectVersionMajor(t *testing.T) {
 			es := mockElasticsearchService("/", test.fakeResp, http.StatusOK)
 			defer es.Close()
 
-			result, err := detectVersionMajor(es.URL)
+			client := &Elasticsearch{host: es.URL}
+			err := client.loadClient()
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			if diff := cmp.Diff(result, test.expected); diff != "" {
+			if diff := cmp.Diff(client.version, test.expected); diff != "" {
 				t.Fatalf("%T differ (-got, +want): %s", test.expected, diff)
 			}
 		})
@@ -222,15 +223,15 @@ func mockElasticsearchService(pattern, fakeResp string, fakeCode int) *httptest.
 	return httptest.NewServer(mux)
 }
 
-func newElasticsearchClient(srv *httptest.Server, version string) Elasticsearch {
-	var es Elasticsearch
+func newElasticsearchClient(srv *httptest.Server, version string) *Elasticsearch {
+	es := &Elasticsearch{index: "ks-logstash-log"}
 	switch version {
 	case ElasticV5:
-		es = Elasticsearch{c: v5.New(srv.URL, "ks-logstash-log")}
+		es.c, _ = v5.New(srv.URL, "ks-logstash-log")
 	case ElasticV6:
-		es = Elasticsearch{c: v6.New(srv.URL, "ks-logstash-log")}
+		es.c, _ = v6.New(srv.URL, "ks-logstash-log")
 	case ElasticV7:
-		es = Elasticsearch{c: v7.New(srv.URL, "ks-logstash-log")}
+		es.c, _ = v7.New(srv.URL, "ks-logstash-log")
 	}
 	return es
 }

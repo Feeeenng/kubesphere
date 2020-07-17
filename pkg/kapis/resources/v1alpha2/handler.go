@@ -48,9 +48,10 @@ func newResourceHandler(k8sClient kubernetes.Interface, factory informers.Inform
 		routerOperator:      routers.NewRouterOperator(k8sClient, factory.KubernetesSharedInformerFactory()),
 		gitVerifier:         git.NewGitVerifier(factory.KubernetesSharedInformerFactory()),
 		registryGetter:      registries.NewRegistryGetter(factory.KubernetesSharedInformerFactory()),
-		kubeconfigOperator:  kubeconfig.NewOperator(k8sClient, nil, masterURL),
-		kubectlOperator: kubectl.NewOperator(k8sClient, factory.KubernetesSharedInformerFactory(),
-			factory.KubeSphereSharedInformerFactory()),
+		kubeconfigOperator:  kubeconfig.NewReadOnlyOperator(factory.KubernetesSharedInformerFactory().Core().V1().ConfigMaps(), masterURL),
+		kubectlOperator: kubectl.NewOperator(nil, factory.KubernetesSharedInformerFactory().Apps().V1().Deployments(),
+			factory.KubernetesSharedInformerFactory().Core().V1().Pods(),
+			factory.KubeSphereSharedInformerFactory().Iam().V1alpha2().Users()),
 	}
 }
 
@@ -268,11 +269,10 @@ func (r *resourceHandler) handleUpdateRouter(request *restful.Request, response 
 }
 
 func (r *resourceHandler) handleVerifyGitCredential(request *restful.Request, response *restful.Response) {
-
 	var credential api.GitCredential
 	err := request.ReadEntity(&credential)
 	if err != nil {
-		api.HandleBadRequest(response, nil, err)
+		response.WriteHeaderAndEntity(http.StatusInternalServerError, errors.Wrap(err))
 		return
 	}
 	var namespace, secretName string
@@ -282,11 +282,10 @@ func (r *resourceHandler) handleVerifyGitCredential(request *restful.Request, re
 	}
 	err = r.gitVerifier.VerifyGitCredential(credential.RemoteUrl, namespace, secretName)
 	if err != nil {
-		api.HandleBadRequest(response, nil, err)
+		response.WriteHeaderAndEntity(http.StatusInternalServerError, errors.Wrap(err))
 		return
 	}
-
-	response.WriteHeader(http.StatusOK)
+	response.WriteAsJson(errors.None)
 }
 
 func (r *resourceHandler) handleVerifyRegistryCredential(request *restful.Request, response *restful.Response) {

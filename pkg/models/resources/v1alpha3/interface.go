@@ -5,7 +5,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"kubesphere.io/kubesphere/pkg/api"
 	"kubesphere.io/kubesphere/pkg/apiserver/query"
-	"kubesphere.io/kubesphere/pkg/constants"
 	"sort"
 	"strings"
 )
@@ -92,7 +91,7 @@ func DefaultObjectMetaFilter(item metav1.ObjectMeta, filter query.Filter) bool {
 	switch filter.Field {
 	case query.FieldNames:
 		for _, name := range strings.Split(string(filter.Value), ",") {
-			if item.Name == name || item.Annotations[constants.DisplayNameAnnotationKey] == name {
+			if item.Name == name {
 				return true
 			}
 		}
@@ -133,7 +132,6 @@ func DefaultObjectMetaFilter(item metav1.ObjectMeta, filter query.Filter) bool {
 	}
 }
 
-// Filter format (key!?=)?value,if the key is defined, the key must match exactly, value match according to strings.Contains.
 func labelMatch(labels map[string]string, filter string) bool {
 	fields := strings.SplitN(filter, "=", 2)
 	var key, value string
@@ -146,21 +144,19 @@ func labelMatch(labels map[string]string, filter string) bool {
 		}
 		value = fields[1]
 	} else {
-		value = fields[0]
+		key = fields[0]
+		value = "*"
 	}
 	for k, v := range labels {
 		if opposite {
-			if (key == "" || k == key) && !strings.Contains(v, value) {
+			if (k == key) && v != value {
 				return true
 			}
 		} else {
-			if (key == "" || k == key) && strings.Contains(v, value) {
+			if (k == key) && (value == "*" || v == value) {
 				return true
 			}
 		}
-	}
-	if opposite && labels[key] == "" {
-		return true
 	}
 	return false
 }

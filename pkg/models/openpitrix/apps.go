@@ -1,12 +1,9 @@
 /*
 Copyright 2020 The KubeSphere Authors.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-
     http://www.apache.org/licenses/LICENSE-2.0
-
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -510,16 +507,16 @@ func (c *appTemplateOperator) GetAppVersionFiles(versionId string, request *GetA
 func (c *appTemplateOperator) ListAppVersionAudits(conditions *params.Conditions, orderBy string, reverse bool, limit, offset int) (*models.PageableResponse, error) {
 	describeAppVersionAudits := &pb.DescribeAppVersionAuditsRequest{}
 
-	if keyword := conditions.Match["keyword"]; keyword != "" {
+	if keyword := conditions.Match[Keyword]; keyword != "" {
 		describeAppVersionAudits.SearchWord = &wrappers.StringValue{Value: keyword}
 	}
 	if appId := conditions.Match[AppId]; appId != "" {
 		describeAppVersionAudits.AppId = []string{appId}
 	}
-	if versionId := conditions.Match["version"]; versionId != "" {
+	if versionId := conditions.Match[VersionId]; versionId != "" {
 		describeAppVersionAudits.VersionId = []string{versionId}
 	}
-	if status := conditions.Match["status"]; status != "" {
+	if status := conditions.Match[Status]; status != "" {
 		describeAppVersionAudits.Status = strings.Split(status, "|")
 	}
 	if orderBy != "" {
@@ -548,10 +545,10 @@ func (c *appTemplateOperator) ListAppVersionAudits(conditions *params.Conditions
 func (c *appTemplateOperator) ListAppVersionReviews(conditions *params.Conditions, orderBy string, reverse bool, limit, offset int) (*models.PageableResponse, error) {
 	describeAppVersionReviews := &pb.DescribeAppVersionReviewsRequest{}
 
-	if keyword := conditions.Match["keyword"]; keyword != "" {
+	if keyword := conditions.Match[Keyword]; keyword != "" {
 		describeAppVersionReviews.SearchWord = &wrappers.StringValue{Value: keyword}
 	}
-	if status := conditions.Match["status"]; status != "" {
+	if status := conditions.Match[Status]; status != "" {
 		describeAppVersionReviews.Status = strings.Split(status, "|")
 	}
 	if orderBy != "" {
@@ -581,13 +578,13 @@ func (c *appTemplateOperator) ListAppVersionReviews(conditions *params.Condition
 func (c *appTemplateOperator) ListAppVersions(conditions *params.Conditions, orderBy string, reverse bool, limit, offset int) (*models.PageableResponse, error) {
 	describeAppVersionsRequest := &pb.DescribeAppVersionsRequest{}
 
-	if keyword := conditions.Match["keyword"]; keyword != "" {
+	if keyword := conditions.Match[Keyword]; keyword != "" {
 		describeAppVersionsRequest.SearchWord = &wrappers.StringValue{Value: keyword}
 	}
 	if appId := conditions.Match[AppId]; appId != "" {
 		describeAppVersionsRequest.AppId = []string{appId}
 	}
-	if status := conditions.Match["status"]; status != "" {
+	if status := conditions.Match[Status]; status != "" {
 		describeAppVersionsRequest.Status = strings.Split(status, "|")
 	}
 	if orderBy != "" {

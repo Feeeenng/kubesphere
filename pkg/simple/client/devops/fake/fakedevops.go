@@ -254,8 +254,8 @@ func (d *Devops) GetSCMServers(scmId string, httpParameters *devops.HttpParamete
 func (d *Devops) GetSCMOrg(scmId string, httpParameters *devops.HttpParameters) ([]devops.SCMOrg, error) {
 	return nil, nil
 }
-func (d *Devops) GetOrgRepo(scmId, organizationId string, httpParameters *devops.HttpParameters) ([]devops.OrgRepo, error) {
-	return nil, nil
+func (d *Devops) GetOrgRepo(scmId, organizationId string, httpParameters *devops.HttpParameters) (devops.OrgRepo, error) {
+	return devops.OrgRepo{}, nil
 }
 func (d *Devops) CreateSCMServers(scmId string, httpParameters *devops.HttpParameters) (*devops.SCMServer, error) {
 	return nil, nil
@@ -539,4 +539,40 @@ func (d *Devops) GetProjectPipelineConfig(projectId, pipelineId string) (*devops
 	}
 
 	return d.Pipelines[projectId][pipelineId], nil
+}
+
+func (d *Devops) AddGlobalRole(roleName string, ids devops.GlobalPermissionIds, overwrite bool) error {
+	return nil
+}
+
+func (d *Devops) AddProjectRole(roleName string, pattern string, ids devops.ProjectPermissionIds, overwrite bool) error {
+	return nil
+}
+
+func (d *Devops) DeleteProjectRoles(roleName ...string) error {
+	return nil
+}
+
+func (d *Devops) AssignProjectRole(roleName string, sid string) error {
+	return nil
+}
+
+func (d *Devops) UnAssignProjectRole(roleName string, sid string) error {
+	return nil
+}
+
+func (d *Devops) AssignGlobalRole(roleName string, sid string) error {
+	return nil
+}
+
+func (d *Devops) UnAssignGlobalRole(roleName string, sid string) error {
+	return nil
+}
+
+func (d *Devops) DeleteUserInProject(sid string) error {
+	return nil
+}
+
+func (d *Devops) GetGlobalRole(roleName string) (string, error) {
+	return "", nil
 }

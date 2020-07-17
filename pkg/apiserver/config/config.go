@@ -22,6 +22,7 @@ import (
 	authoptions "kubesphere.io/kubesphere/pkg/apiserver/authentication/options"
 	authorizationoptions "kubesphere.io/kubesphere/pkg/apiserver/authorization/options"
 	"kubesphere.io/kubesphere/pkg/simple/client/alerting"
+	auditingclient "kubesphere.io/kubesphere/pkg/simple/client/auditing/elasticsearch"
 	"kubesphere.io/kubesphere/pkg/simple/client/cache"
 	"kubesphere.io/kubesphere/pkg/simple/client/devops/jenkins"
 	eventsclient "kubesphere.io/kubesphere/pkg/simple/client/events/elasticsearch"
@@ -92,10 +93,9 @@ type Config struct {
 	AuthorizationOptions  *authorizationoptions.AuthorizationOptions `json:"authorization,omitempty" yaml:"authorization,omitempty" mapstructure:"authorization"`
 	MultiClusterOptions   *multicluster.Options                      `json:"multicluster,omitempty" yaml:"multicluster,omitempty" mapstructure:"multicluster"`
 	EventsOptions         *eventsclient.Options                      `json:"events,omitempty" yaml:"events,omitempty" mapstructure:"events"`
-	// Options used for enabling components, not actually used now. Once we switch Alerting/Notification API to kubesphere,
-	// we can add these options to kubesphere command lines
-	AlertingOptions     *alerting.Options     `json:"alerting,omitempty" yaml:"alerting,omitempty" mapstructure:"alerting"`
-	NotificationOptions *notification.Options `json:"notification,omitempty" yaml:"notification,omitempty" mapstructure:"notification"`
+	AuditingOptions       *auditingclient.Options                    `json:"auditing,omitempty" yaml:"auditing,omitempty" mapstructure:"auditing"`
+	AlertingOptions       *alerting.Options                          `json:"alerting,omitempty" yaml:"alerting,omitempty" mapstructure:"alerting"`
+	NotificationOptions   *notification.Options                      `json:"notification,omitempty" yaml:"notification,omitempty" mapstructure:"notification"`
 }
 
 // newConfig creates a default non-empty Config
@@ -118,6 +118,7 @@ func New() *Config {
 		AuthorizationOptions:  authorizationoptions.NewAuthorizationOptions(),
 		MultiClusterOptions:   multicluster.NewOptions(),
 		EventsOptions:         eventsclient.NewElasticSearchOptions(),
+		AuditingOptions:       auditingclient.NewElasticSearchOptions(),
 	}
 }
 
@@ -186,8 +187,7 @@ func (conf *Config) stripEmptyOptions() {
 		conf.DevopsOptions = nil
 	}
 
-	if conf.MonitoringOptions != nil && conf.MonitoringOptions.Endpoint == "" &&
-		conf.MonitoringOptions.SecondaryEndpoint == "" {
+	if conf.MonitoringOptions != nil && conf.MonitoringOptions.Endpoint == "" {
 		conf.MonitoringOptions = nil
 	}
 
@@ -203,7 +203,7 @@ func (conf *Config) stripEmptyOptions() {
 		conf.OpenPitrixOptions = nil
 	}
 
-	if conf.NetworkOptions != nil && conf.NetworkOptions.WeaveScopeHost == "" {
+	if conf.NetworkOptions != nil && conf.NetworkOptions.EnableNetworkPolicy == false {
 		conf.NetworkOptions = nil
 	}
 
@@ -235,5 +235,9 @@ func (conf *Config) stripEmptyOptions() {
 
 	if conf.EventsOptions != nil && conf.EventsOptions.Host == "" {
 		conf.EventsOptions = nil
+	}
+
+	if conf.AuditingOptions != nil && conf.AuditingOptions.Host == "" {
+		conf.AuditingOptions = nil
 	}
 }

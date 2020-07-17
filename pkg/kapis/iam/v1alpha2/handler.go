@@ -5,12 +5,16 @@ import (
 	"github.com/emicklei/go-restful"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/klog"
 	"kubesphere.io/kubesphere/pkg/api"
+	"kubesphere.io/kubesphere/pkg/api/iam"
 	iamv1alpha2 "kubesphere.io/kubesphere/pkg/apis/iam/v1alpha2"
 	authoptions "kubesphere.io/kubesphere/pkg/apiserver/authentication/options"
+	"kubesphere.io/kubesphere/pkg/apiserver/authorization/authorizer"
+	"kubesphere.io/kubesphere/pkg/apiserver/authorization/authorizerfactory"
 	"kubesphere.io/kubesphere/pkg/apiserver/query"
-	apirequeset "kubesphere.io/kubesphere/pkg/apiserver/request"
+	apirequest "kubesphere.io/kubesphere/pkg/apiserver/request"
 	"kubesphere.io/kubesphere/pkg/models/iam/am"
 	"kubesphere.io/kubesphere/pkg/models/iam/im"
 	servererr "kubesphere.io/kubesphere/pkg/server/errors"
@@ -18,14 +22,16 @@ import (
 )
 
 type iamHandler struct {
-	am am.AccessManagementInterface
-	im im.IdentityManagementInterface
+	am         am.AccessManagementInterface
+	im         im.IdentityManagementInterface
+	authorizer authorizer.Authorizer
 }
 
 func newIAMHandler(im im.IdentityManagementInterface, am am.AccessManagementInterface, options *authoptions.AuthenticationOptions) *iamHandler {
 	return &iamHandler{
-		am: am,
-		im: im,
+		am:         am,
+		im:         im,
+		authorizer: authorizerfactory.NewRBACAuthorizer(am),
 	}
 }
 
@@ -34,101 +40,155 @@ type Member struct {
 	RoleRef  string `json:"roleRef"`
 }
 
-func (h *iamHandler) DescribeUserOrClusterMember(request *restful.Request, response *restful.Response) {
-	requestInfo, ok := apirequeset.RequestInfoFrom(request.Request.Context())
-
-	if ok && requestInfo.ResourceScope == apirequeset.ClusterScope {
-		h.DescribeClusterMember(request, response)
-		return
-	}
-
+func (h *iamHandler) DescribeUser(request *restful.Request, response *restful.Response) {
 	username := request.PathParameter("user")
 
 	user, err := h.im.DescribeUser(username)
-
 	if err != nil {
 		api.HandleInternalError(response, request, err)
 		return
 	}
 
 	globalRole, err := h.am.GetGlobalRoleOfUser(username)
-
 	if err != nil && !errors.IsNotFound(err) {
 		api.HandleInternalError(response, request, err)
 		return
 	}
 
 	if globalRole != nil {
-		if user.Annotations == nil {
-			user.Annotations = make(map[string]string, 0)
-		}
-		user.Annotations[iamv1alpha2.GlobalRoleAnnotation] = globalRole.Name
+		user = appendGlobalRoleAnnotation(user, globalRole.Name)
 	}
 
 	response.WriteEntity(user)
 }
 
-func (h *iamHandler) RetrieveMemberRole(req *restful.Request, resp *restful.Response) {
-	username := req.PathParameter("user")
+func (h *iamHandler) RetrieveMemberRoleTemplates(request *restful.Request, response *restful.Response) {
 
-	if strings.HasSuffix(req.Request.URL.Path, iamv1alpha2.ResourcesSingularGlobalRole) {
+	if strings.HasSuffix(request.Request.URL.Path, iamv1alpha2.ResourcesPluralGlobalRole) {
+		username := request.PathParameter("user")
+
 		globalRole, err := h.am.GetGlobalRoleOfUser(username)
-
 		if err != nil {
-			api.HandleInternalError(resp, req, err)
+			// if role binding not exist return empty list
+			if errors.IsNotFound(err) {
+				response.WriteEntity([]interface{}{})
+				return
+			}
+			api.HandleInternalError(response, request, err)
 			return
 		}
-		resp.WriteEntity(globalRole)
+
+		result, err := h.am.ListGlobalRoles(&query.Query{
+			Pagination: query.NoPagination,
+			SortBy:     "",
+			Ascending:  false,
+			Filters:    map[query.Field]query.Value{iamv1alpha2.AggregateTo: query.Value(globalRole.Name)},
+		})
+
+		if err != nil {
+			api.HandleInternalError(response, request, err)
+			return
+		}
+
+		response.WriteEntity(result.Items)
 		return
 	}
 
-	if strings.HasSuffix(req.Request.URL.Path, iamv1alpha2.ResourcesSingularClusterRole) {
+	if strings.HasSuffix(request.Request.URL.Path, iamv1alpha2.ResourcesPluralClusterRole) {
+		username := request.PathParameter("clustermember")
 		clusterRole, err := h.am.GetClusterRoleOfUser(username)
-
 		if err != nil {
-			api.HandleInternalError(resp, req, err)
+			// if role binding not exist return empty list
+			if errors.IsNotFound(err) {
+				response.WriteEntity([]interface{}{})
+				return
+			}
+			api.HandleInternalError(response, request, err)
 			return
 		}
-		resp.WriteEntity(clusterRole)
+
+		result, err := h.am.ListClusterRoles(&query.Query{
+			Pagination: query.NoPagination,
+			SortBy:     "",
+			Ascending:  false,
+			Filters:    map[query.Field]query.Value{iamv1alpha2.AggregateTo: query.Value(clusterRole.Name)},
+		})
+		if err != nil {
+			api.HandleInternalError(response, request, err)
+			return
+		}
+
+		response.WriteEntity(result.Items)
 		return
 	}
 
-	if strings.HasSuffix(req.Request.URL.Path, iamv1alpha2.ResourcesSingularWorkspaceRole) {
-		workspace := req.PathParameter("workspace")
-
+	if strings.HasSuffix(request.Request.URL.Path, iamv1alpha2.ResourcesPluralWorkspaceRole) {
+		workspace := request.PathParameter("workspace")
+		username := request.PathParameter("workspacemember")
 		workspaceRole, err := h.am.GetWorkspaceRoleOfUser(username, workspace)
-
 		if err != nil {
-			api.HandleInternalError(resp, req, err)
+			// if role binding not exist return empty list
+			if errors.IsNotFound(err) {
+				response.WriteEntity([]interface{}{})
+				return
+			}
+			api.HandleInternalError(response, request, err)
 			return
 		}
 
-		resp.WriteEntity(workspaceRole)
+		result, err := h.am.ListWorkspaceRoles(&query.Query{
+			Pagination: query.NoPagination,
+			SortBy:     "",
+			Ascending:  false,
+			Filters:    map[query.Field]query.Value{iamv1alpha2.AggregateTo: query.Value(workspaceRole.Name)},
+		})
+		if err != nil {
+			api.HandleInternalError(response, request, err)
+			return
+		}
+
+		response.WriteEntity(result.Items)
 		return
 	}
 
-	if strings.HasSuffix(req.Request.URL.Path, iamv1alpha2.ResourcesSingularRole) {
-		namespace := req.PathParameter("namespace")
+	if strings.HasSuffix(request.Request.URL.Path, iamv1alpha2.ResourcesPluralRole) {
+		namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
+		username := request.PathParameter("member")
+		if err != nil {
+			api.HandleInternalError(response, request, err)
+			return
+		}
 
 		role, err := h.am.GetNamespaceRoleOfUser(username, namespace)
 
 		if err != nil {
-			api.HandleInternalError(resp, req, err)
+			// if role binding not exist return empty list
+			if errors.IsNotFound(err) {
+				response.WriteEntity([]interface{}{})
+				return
+			}
+			api.HandleInternalError(response, request, err)
 			return
 		}
-		resp.WriteEntity(role)
+
+		result, err := h.am.ListRoles(namespace, &query.Query{
+			Pagination: query.NoPagination,
+			SortBy:     "",
+			Ascending:  false,
+			Filters:    map[query.Field]query.Value{iamv1alpha2.AggregateTo: query.Value(role.Name)},
+		})
+
+		if err != nil {
+			api.HandleInternalError(response, request, err)
+			return
+		}
+
+		response.WriteEntity(result.Items)
 		return
 	}
 }
 
-func (h *iamHandler) ListUsersOrClusterMembers(request *restful.Request, response *restful.Response) {
-	requestInfo, ok := apirequeset.RequestInfoFrom(request.Request.Context())
-
-	if ok && requestInfo.ResourceScope == apirequeset.ClusterScope {
-		h.ListClusterMembers(request, response)
-		return
-	}
-
+func (h *iamHandler) ListUsers(request *restful.Request, response *restful.Response) {
 	queryParam := query.ParseQueryParameter(request)
 	result, err := h.im.ListUsers(queryParam)
 	if err != nil {
@@ -147,29 +207,26 @@ func (h *iamHandler) ListUsersOrClusterMembers(request *restful.Request, respons
 		}
 
 		if globalRole != nil {
-
-			if user.Annotations == nil {
-				user.Annotations = make(map[string]string, 0)
-			}
-			user.Annotations[iamv1alpha2.GlobalRoleAnnotation] = globalRole.Name
+			user = appendGlobalRoleAnnotation(user, globalRole.Name)
 		}
-
 		result.Items[i] = user
 	}
 	response.WriteEntity(result)
 }
 
+func appendGlobalRoleAnnotation(user *iamv1alpha2.User, globalRole string) *iamv1alpha2.User {
+	if user.Annotations == nil {
+		user.Annotations = make(map[string]string, 0)
+	}
+	user.Annotations[iamv1alpha2.GlobalRoleAnnotation] = globalRole
+	return user
+}
+
 func (h *iamHandler) ListRoles(request *restful.Request, response *restful.Response) {
-
 	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -208,18 +265,12 @@ func (h *iamHandler) ListNamespaceMembers(request *restful.Request, response *re
 
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	queryParam.Filters[iamv1alpha2.ScopeNamespace] = query.Value(namespace)
-
 	result, err := h.im.ListUsers(queryParam)
-
 	if err != nil {
 		api.HandleInternalError(response, request, err)
 		return
@@ -229,16 +280,11 @@ func (h *iamHandler) ListNamespaceMembers(request *restful.Request, response *re
 }
 
 func (h *iamHandler) DescribeNamespaceMember(request *restful.Request, response *restful.Response) {
-	username := request.PathParameter("user")
+	username := request.PathParameter("member")
 	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -247,7 +293,6 @@ func (h *iamHandler) DescribeNamespaceMember(request *restful.Request, response 
 	queryParam.Filters[iamv1alpha2.ScopeNamespace] = query.Value(namespace)
 
 	result, err := h.im.ListUsers(queryParam)
-
 	if err != nil {
 		api.HandleInternalError(response, request, err)
 		return
@@ -289,7 +334,6 @@ func (h *iamHandler) ListWorkspaceMembers(request *restful.Request, response *re
 	queryParam.Filters[iamv1alpha2.ScopeWorkspace] = query.Value(workspace)
 
 	result, err := h.im.ListUsers(queryParam)
-
 	if err != nil {
 		api.HandleInternalError(response, request, err)
 		return
@@ -300,14 +344,13 @@ func (h *iamHandler) ListWorkspaceMembers(request *restful.Request, response *re
 
 func (h *iamHandler) DescribeWorkspaceMember(request *restful.Request, response *restful.Response) {
 	workspace := request.PathParameter("workspace")
-	username := request.PathParameter("user")
+	username := request.PathParameter("workspacemember")
 
 	queryParam := query.New()
 	queryParam.Filters[query.FieldName] = query.Value(username)
 	queryParam.Filters[iamv1alpha2.ScopeWorkspace] = query.Value(workspace)
 
 	result, err := h.im.ListUsers(queryParam)
-
 	if err != nil {
 		api.HandleInternalError(response, request, err)
 		return
@@ -327,9 +370,7 @@ func (h *iamHandler) UpdateWorkspaceRole(request *restful.Request, response *res
 	workspaceRoleName := request.PathParameter("workspacerole")
 
 	var workspaceRole iamv1alpha2.WorkspaceRole
-
 	err := request.ReadEntity(&workspaceRole)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -344,18 +385,9 @@ func (h *iamHandler) UpdateWorkspaceRole(request *restful.Request, response *res
 	}
 
 	updated, err := h.am.CreateOrUpdateWorkspaceRole(workspace, &workspaceRole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -366,9 +398,7 @@ func (h *iamHandler) CreateWorkspaceRole(request *restful.Request, response *res
 	workspace := request.PathParameter("workspace")
 
 	var workspaceRole iamv1alpha2.WorkspaceRole
-
 	err := request.ReadEntity(&workspaceRole)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -376,14 +406,9 @@ func (h *iamHandler) CreateWorkspaceRole(request *restful.Request, response *res
 	}
 
 	created, err := h.am.CreateOrUpdateWorkspaceRole(workspace, &workspaceRole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -395,29 +420,16 @@ func (h *iamHandler) DeleteWorkspaceRole(request *restful.Request, response *res
 	workspaceRoleName := request.PathParameter("workspacerole")
 
 	err := h.am.DeleteWorkspaceRole(workspace, workspaceRoleName)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	response.WriteEntity(servererr.None)
 }
 
-func (h *iamHandler) CreateUserOrClusterMembers(request *restful.Request, response *restful.Response) {
-
-	requestInfo, ok := apirequeset.RequestInfoFrom(request.Request.Context())
-
-	if ok && requestInfo.ResourceScope == apirequeset.ClusterScope {
-		h.CreateClusterMembers(request, response)
-		return
-	}
-
+func (h *iamHandler) CreateUser(request *restful.Request, response *restful.Response) {
 	var user iamv1alpha2.User
 	err := request.ReadEntity(&user)
 
@@ -433,40 +445,22 @@ func (h *iamHandler) CreateUserOrClusterMembers(request *restful.Request, respon
 	if globalRole != "" {
 		if _, err = h.am.GetGlobalRole(globalRole); err != nil {
 			klog.Error(err)
-			if errors.IsNotFound(err) {
-				api.HandleBadRequest(response, request, err)
-				return
-			}
-			api.HandleInternalError(response, request, err)
+			handleError(request, response, err)
 			return
 		}
 	}
 
 	created, err := h.im.CreateUser(&user)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		if errors.IsAlreadyExists(err) {
-			api.HandleConflict(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	if globalRole != "" {
-		if err := h.am.CreateOrUpdateGlobalRoleBinding(user.Name, globalRole); err != nil {
-
-			if errors.IsNotFound(err) {
-				api.HandleBadRequest(response, request, err)
-				return
-			}
-
-			api.HandleInternalError(response, request, err)
+		if err := h.am.CreateGlobalRoleBinding(user.Name, globalRole); err != nil {
+			klog.Error(err)
+			handleError(request, response, err)
 			return
 		}
 	}
@@ -477,14 +471,7 @@ func (h *iamHandler) CreateUserOrClusterMembers(request *restful.Request, respon
 	response.WriteEntity(created)
 }
 
-func (h *iamHandler) UpdateUserOrClusterMember(request *restful.Request, response *restful.Response) {
-	requestInfo, ok := apirequeset.RequestInfoFrom(request.Request.Context())
-
-	if ok && requestInfo.ResourceScope == apirequeset.ClusterScope {
-		h.UpdateClusterMember(request, response)
-		return
-	}
-
+func (h *iamHandler) UpdateUser(request *restful.Request, response *restful.Response) {
 	username := request.PathParameter("user")
 
 	var user iamv1alpha2.User
@@ -508,55 +495,72 @@ func (h *iamHandler) UpdateUserOrClusterMember(request *restful.Request, respons
 	delete(user.Annotations, iamv1alpha2.GlobalRoleAnnotation)
 
 	updated, err := h.im.UpdateUser(&user)
-
 	if err != nil {
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		klog.Error(err)
+		handleError(request, response, err)
 		return
 	}
 
-	if globalRole != "" {
-		if err := h.am.CreateOrUpdateGlobalRoleBinding(user.Name, globalRole); err != nil {
+	operator, ok := apirequest.UserFrom(request.Request.Context())
 
-			if errors.IsNotFound(err) {
-				api.HandleBadRequest(response, request, err)
-				return
-			}
-
-			api.HandleInternalError(response, request, err)
+	if globalRole != "" && ok {
+		err = h.updateGlobalRoleBinding(operator, updated, globalRole)
+		if err != nil {
+			klog.Error(err)
+			handleError(request, response, err)
 			return
 		}
+		updated = appendGlobalRoleAnnotation(updated, globalRole)
 	}
 
 	response.WriteEntity(updated)
 }
 
-func (h *iamHandler) DeleteUserOrClusterMember(request *restful.Request, response *restful.Response) {
-	requestInfo, ok := apirequeset.RequestInfoFrom(request.Request.Context())
+func (h *iamHandler) ModifyPassword(request *restful.Request, response *restful.Response) {
+	username := request.PathParameter("user")
 
-	if ok && requestInfo.ResourceScope == apirequeset.ClusterScope {
-		h.RemoveClusterMember(request, response)
+	var passwordReset iam.PasswordReset
+	err := request.ReadEntity(&passwordReset)
+	if err != nil {
+		klog.Error(err)
+		api.HandleBadRequest(response, request, err)
 		return
 	}
 
+	operator, ok := apirequest.UserFrom(request.Request.Context())
+	// change password by self
+	if ok && operator.GetName() == username {
+		_, err := h.im.Authenticate(username, passwordReset.CurrentPassword)
+		if err != nil {
+			if err == im.AuthFailedIncorrectPassword {
+				err = errors.NewBadRequest("incorrect old password")
+				klog.Warning(err)
+				handleError(request, response, err)
+				return
+			}
+			klog.Error(err)
+			handleError(request, response, err)
+			return
+		}
+	}
+
+	err = h.im.ModifyPassword(username, passwordReset.Password)
+	if err != nil {
+		klog.Error(err)
+		handleError(request, response, err)
+		return
+	}
+	response.WriteEntity(servererr.None)
+}
+
+func (h *iamHandler) DeleteUser(request *restful.Request, response *restful.Response) {
 	username := request.PathParameter("user")
 
 	err := h.im.DeleteUser(username)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
+		return
 	}
 
 	response.WriteEntity(servererr.None)
@@ -567,7 +571,6 @@ func (h *iamHandler) CreateGlobalRole(request *restful.Request, response *restfu
 	var globalRole iamv1alpha2.GlobalRole
 
 	err := request.ReadEntity(&globalRole)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -575,14 +578,9 @@ func (h *iamHandler) CreateGlobalRole(request *restful.Request, response *restfu
 	}
 
 	created, err := h.am.CreateOrUpdateGlobalRole(&globalRole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -593,14 +591,9 @@ func (h *iamHandler) DeleteGlobalRole(request *restful.Request, response *restfu
 	globalRole := request.PathParameter("globalrole")
 
 	err := h.am.DeleteGlobalRole(globalRole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -613,7 +606,6 @@ func (h *iamHandler) UpdateGlobalRole(request *restful.Request, response *restfu
 	var globalRole iamv1alpha2.GlobalRole
 
 	err := request.ReadEntity(&globalRole)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -628,14 +620,9 @@ func (h *iamHandler) UpdateGlobalRole(request *restful.Request, response *restfu
 	}
 
 	updated, err := h.am.CreateOrUpdateGlobalRole(&globalRole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -647,22 +634,15 @@ func (h *iamHandler) DescribeGlobalRole(request *restful.Request, response *rest
 	globalRole, err := h.am.GetGlobalRole(globalRoleName)
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
-
 	response.WriteEntity(globalRole)
 }
 
 func (h *iamHandler) CreateClusterRole(request *restful.Request, response *restful.Response) {
 	var clusterRole rbacv1.ClusterRole
-
 	err := request.ReadEntity(&clusterRole)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -670,14 +650,9 @@ func (h *iamHandler) CreateClusterRole(request *restful.Request, response *restf
 	}
 
 	created, err := h.am.CreateOrUpdateClusterRole(&clusterRole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -688,14 +663,9 @@ func (h *iamHandler) DeleteClusterRole(request *restful.Request, response *restf
 	clusterrole := request.PathParameter("clusterrole")
 
 	err := h.am.DeleteClusterRole(clusterrole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -708,7 +678,6 @@ func (h *iamHandler) UpdateClusterRole(request *restful.Request, response *restf
 	var clusterRole rbacv1.ClusterRole
 
 	err := request.ReadEntity(&clusterRole)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -723,18 +692,9 @@ func (h *iamHandler) UpdateClusterRole(request *restful.Request, response *restf
 	}
 
 	updated, err := h.am.CreateOrUpdateClusterRole(&clusterRole)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -746,14 +706,9 @@ func (h *iamHandler) DescribeClusterRole(request *restful.Request, response *res
 	clusterRole, err := h.am.GetClusterRole(clusterRoleName)
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
-
 	response.WriteEntity(clusterRole)
 }
 
@@ -763,35 +718,23 @@ func (h *iamHandler) DescribeWorkspaceRole(request *restful.Request, response *r
 	workspaceRole, err := h.am.GetWorkspaceRole(workspace, workspaceRoleName)
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
-
 	response.WriteEntity(workspaceRole)
 }
 
 func (h *iamHandler) CreateNamespaceRole(request *restful.Request, response *restful.Response) {
 
 	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	var role rbacv1.Role
-
 	err = request.ReadEntity(&role)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -799,14 +742,9 @@ func (h *iamHandler) CreateNamespaceRole(request *restful.Request, response *res
 	}
 
 	created, err := h.am.CreateOrUpdateNamespaceRole(namespace, &role)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -814,29 +752,19 @@ func (h *iamHandler) CreateNamespaceRole(request *restful.Request, response *res
 }
 
 func (h *iamHandler) DeleteNamespaceRole(request *restful.Request, response *restful.Response) {
-
 	role := request.PathParameter("role")
-	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
 
+	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	err = h.am.DeleteNamespaceRole(namespace, role)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -844,24 +772,17 @@ func (h *iamHandler) DeleteNamespaceRole(request *restful.Request, response *res
 }
 
 func (h *iamHandler) UpdateNamespaceRole(request *restful.Request, response *restful.Response) {
-
 	roleName := request.PathParameter("role")
-	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
 
+	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	var role rbacv1.Role
-
 	err = request.ReadEntity(&role)
-
 	if err != nil {
 		klog.Errorf("%+v", err)
 		api.HandleBadRequest(response, request, err)
@@ -876,18 +797,9 @@ func (h *iamHandler) UpdateNamespaceRole(request *restful.Request, response *res
 	}
 
 	updated, err := h.am.CreateOrUpdateNamespaceRole(namespace, &role)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -898,9 +810,7 @@ func (h *iamHandler) CreateWorkspaceMembers(request *restful.Request, response *
 	workspace := request.PathParameter("workspace")
 
 	var members []Member
-
 	err := request.ReadEntity(&members)
-
 	if err != nil {
 		klog.Error(err)
 		api.HandleBadRequest(response, request, err)
@@ -908,34 +818,25 @@ func (h *iamHandler) CreateWorkspaceMembers(request *restful.Request, response *
 	}
 
 	for _, member := range members {
-		err := h.am.CreateOrUpdateWorkspaceRoleBinding(member.Username, workspace, member.RoleRef)
+		err := h.am.CreateWorkspaceRoleBinding(member.Username, workspace, member.RoleRef)
 		if err != nil {
 			klog.Error(err)
-			if errors.IsNotFound(err) {
-				api.HandleNotFound(response, request, err)
-				return
-			}
-			api.HandleInternalError(response, request, err)
+			handleError(request, response, err)
 			return
 		}
 	}
 
-	response.WriteEntity(servererr.None)
+	response.WriteEntity(members)
 }
 
 func (h *iamHandler) RemoveWorkspaceMember(request *restful.Request, response *restful.Response) {
 	workspace := request.PathParameter("workspace")
-	username := request.PathParameter("user")
+	username := request.PathParameter("workspacemember")
 
 	err := h.am.RemoveUserFromWorkspace(username, workspace)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -944,12 +845,10 @@ func (h *iamHandler) RemoveWorkspaceMember(request *restful.Request, response *r
 
 func (h *iamHandler) UpdateWorkspaceMember(request *restful.Request, response *restful.Response) {
 	workspace := request.PathParameter("workspace")
-	username := request.PathParameter("user")
+	username := request.PathParameter("workspacemember")
 
 	var member Member
-
 	err := request.ReadEntity(&member)
-
 	if err != nil {
 		klog.Error(err)
 		api.HandleBadRequest(response, request, err)
@@ -963,42 +862,27 @@ func (h *iamHandler) UpdateWorkspaceMember(request *restful.Request, response *r
 		return
 	}
 
-	err = h.am.CreateOrUpdateWorkspaceRoleBinding(member.Username, workspace, member.RoleRef)
+	err = h.am.CreateWorkspaceRoleBinding(member.Username, workspace, member.RoleRef)
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
-	response.WriteEntity(servererr.None)
+	response.WriteEntity(member)
 }
 
 func (h *iamHandler) CreateNamespaceMembers(request *restful.Request, response *restful.Response) {
 
 	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	var members []Member
-
 	err = request.ReadEntity(&members)
-
 	if err != nil {
 		klog.Error(err)
 		api.HandleBadRequest(response, request, err)
@@ -1006,39 +890,29 @@ func (h *iamHandler) CreateNamespaceMembers(request *restful.Request, response *
 	}
 
 	for _, member := range members {
-		err := h.am.CreateOrUpdateNamespaceRoleBinding(member.Username, namespace, member.RoleRef)
+		err := h.am.CreateNamespaceRoleBinding(member.Username, namespace, member.RoleRef)
 		if err != nil {
 			klog.Error(err)
-			if errors.IsNotFound(err) {
-				api.HandleNotFound(response, request, err)
-				return
-			}
-			api.HandleInternalError(response, request, err)
+			handleError(request, response, err)
 			return
 		}
 	}
 
-	response.WriteEntity(servererr.None)
+	response.WriteEntity(members)
 }
 
 func (h *iamHandler) UpdateNamespaceMember(request *restful.Request, response *restful.Response) {
-	username := request.PathParameter("user")
-	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
+	username := request.PathParameter("member")
 
+	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	var member Member
-
 	err = request.ReadEntity(&member)
-
 	if err != nil {
 		klog.Error(err)
 		api.HandleBadRequest(response, request, err)
@@ -1052,47 +926,30 @@ func (h *iamHandler) UpdateNamespaceMember(request *restful.Request, response *r
 		return
 	}
 
-	err = h.am.CreateOrUpdateNamespaceRoleBinding(member.Username, namespace, member.RoleRef)
+	err = h.am.CreateNamespaceRoleBinding(member.Username, namespace, member.RoleRef)
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
-	response.WriteEntity(servererr.None)
+	response.WriteEntity(member)
 }
 
 func (h *iamHandler) RemoveNamespaceMember(request *restful.Request, response *restful.Response) {
-	username := request.PathParameter("user")
-	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
+	username := request.PathParameter("member")
 
+	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	err = h.am.RemoveUserFromNamespace(username, namespace)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -1103,7 +960,6 @@ func (h *iamHandler) CreateClusterMembers(request *restful.Request, response *re
 	var members []Member
 
 	err := request.ReadEntity(&members)
-
 	if err != nil {
 		klog.Error(err)
 		api.HandleBadRequest(response, request, err)
@@ -1111,33 +967,24 @@ func (h *iamHandler) CreateClusterMembers(request *restful.Request, response *re
 	}
 
 	for _, member := range members {
-		err := h.am.CreateOrUpdateClusterRoleBinding(member.Username, member.RoleRef)
+		err := h.am.CreateClusterRoleBinding(member.Username, member.RoleRef)
 		if err != nil {
 			klog.Error(err)
-			if errors.IsNotFound(err) {
-				api.HandleNotFound(response, request, err)
-				return
-			}
-			api.HandleInternalError(response, request, err)
+			handleError(request, response, err)
 			return
 		}
 	}
 
-	response.WriteEntity(servererr.None)
+	response.WriteEntity(members)
 }
 
 func (h *iamHandler) RemoveClusterMember(request *restful.Request, response *restful.Response) {
-	username := request.PathParameter("user")
+	username := request.PathParameter("clustermember")
 
 	err := h.am.RemoveUserFromCluster(username)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -1145,12 +992,10 @@ func (h *iamHandler) RemoveClusterMember(request *restful.Request, response *res
 }
 
 func (h *iamHandler) UpdateClusterMember(request *restful.Request, response *restful.Response) {
-	username := request.PathParameter("user")
+	username := request.PathParameter("clustermember")
 
 	var member Member
-
 	err := request.ReadEntity(&member)
-
 	if err != nil {
 		klog.Error(err)
 		api.HandleBadRequest(response, request, err)
@@ -1164,33 +1009,24 @@ func (h *iamHandler) UpdateClusterMember(request *restful.Request, response *res
 		return
 	}
 
-	err = h.am.CreateOrUpdateClusterRoleBinding(member.Username, member.RoleRef)
+	err = h.am.CreateClusterRoleBinding(member.Username, member.RoleRef)
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		if errors.IsBadRequest(err) {
-			api.HandleBadRequest(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
-	response.WriteEntity(servererr.None)
+	response.WriteEntity(member)
 }
 
 func (h *iamHandler) DescribeClusterMember(request *restful.Request, response *restful.Response) {
-	username := request.PathParameter("user")
+	username := request.PathParameter("clustermember")
 
 	queryParam := query.New()
 	queryParam.Filters[query.FieldName] = query.Value(username)
-	queryParam.Filters[iamv1alpha2.ScopeCluster] = iamv1alpha2.LocalCluster
+	queryParam.Filters[iamv1alpha2.ScopeCluster] = "true"
 
 	result, err := h.im.ListUsers(queryParam)
-
 	if err != nil {
 		api.HandleInternalError(response, request, err)
 		return
@@ -1207,11 +1043,9 @@ func (h *iamHandler) DescribeClusterMember(request *restful.Request, response *r
 
 func (h *iamHandler) ListClusterMembers(request *restful.Request, response *restful.Response) {
 	queryParam := query.ParseQueryParameter(request)
-
-	queryParam.Filters[iamv1alpha2.ScopeCluster] = iamv1alpha2.LocalCluster
+	queryParam.Filters[iamv1alpha2.ScopeCluster] = "true"
 
 	result, err := h.im.ListUsers(queryParam)
-
 	if err != nil {
 		api.HandleInternalError(response, request, err)
 		return
@@ -1221,29 +1055,18 @@ func (h *iamHandler) ListClusterMembers(request *restful.Request, response *rest
 }
 
 func (h *iamHandler) DescribeNamespaceRole(request *restful.Request, response *restful.Response) {
-
 	roleName := request.PathParameter("role")
 	namespace, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
 	role, err := h.am.GetNamespaceRole(namespace, roleName)
-
 	if err != nil {
 		klog.Error(err)
-		if errors.IsNotFound(err) {
-			api.HandleNotFound(response, request, err)
-			return
-		}
-		api.HandleInternalError(response, request, err)
+		handleError(request, response, err)
 		return
 	}
 
@@ -1256,4 +1079,146 @@ func (h *iamHandler) resolveNamespace(namespace string, devops string) (string, 
 		return namespace, nil
 	}
 	return h.am.GetControlledNamespace(devops)
+}
+
+func (h *iamHandler) PatchWorkspaceRole(request *restful.Request, response *restful.Response) {
+	workspaceName := request.PathParameter("workspace")
+	workspaceRoleName := request.PathParameter("workspacerole")
+
+	var workspaceRole iamv1alpha2.WorkspaceRole
+	err := request.ReadEntity(&workspaceRole)
+	if err != nil {
+		klog.Error(err)
+		api.HandleBadRequest(response, request, err)
+		return
+	}
+
+	workspaceRole.Name = workspaceRoleName
+	patched, err := h.am.PatchWorkspaceRole(workspaceName, &workspaceRole)
+	if err != nil {
+		handleError(request, response, err)
+		return
+	}
+
+	response.WriteEntity(patched)
+}
+
+func (h *iamHandler) PatchGlobalRole(request *restful.Request, response *restful.Response) {
+	globalRoleName := request.PathParameter("globalrole")
+
+	var globalRole iamv1alpha2.GlobalRole
+	err := request.ReadEntity(&globalRole)
+	if err != nil {
+		klog.Error(err)
+		api.HandleBadRequest(response, request, err)
+		return
+	}
+
+	globalRole.Name = globalRoleName
+	patched, err := h.am.PatchGlobalRole(&globalRole)
+	if err != nil {
+		handleError(request, response, err)
+		return
+	}
+
+	response.WriteEntity(patched)
+}
+
+func (h *iamHandler) PatchNamespaceRole(request *restful.Request, response *restful.Response) {
+	roleName := request.PathParameter("role")
+	namespaceName, err := h.resolveNamespace(request.PathParameter("namespace"), request.PathParameter("devops"))
+	if err != nil {
+		klog.Error(err)
+		handleError(request, response, err)
+		return
+	}
+
+	var role rbacv1.Role
+	err = request.ReadEntity(&role)
+	if err != nil {
+		klog.Error(err)
+		api.HandleBadRequest(response, request, err)
+		return
+	}
+
+	role.Name = roleName
+	patched, err := h.am.PatchNamespaceRole(namespaceName, &role)
+	if err != nil {
+		handleError(request, response, err)
+		return
+	}
+
+	response.WriteEntity(patched)
+}
+
+func (h *iamHandler) PatchClusterRole(request *restful.Request, response *restful.Response) {
+	clusterRoleName := request.PathParameter("clusterrole")
+
+	var clusterRole rbacv1.ClusterRole
+	err := request.ReadEntity(&clusterRole)
+	if err != nil {
+		klog.Error(err)
+		api.HandleBadRequest(response, request, err)
+		return
+	}
+
+	clusterRole.Name = clusterRoleName
+	patched, err := h.am.PatchClusterRole(&clusterRole)
+	if err != nil {
+		handleError(request, response, err)
+		return
+	}
+
+	response.WriteEntity(patched)
+}
+
+func (h *iamHandler) updateGlobalRoleBinding(operator user.Info, user *iamv1alpha2.User, globalRole string) error {
+
+	oldGlobalRole, err := h.am.GetGlobalRoleOfUser(user.Name)
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Error(err)
+		return err
+	}
+
+	if oldGlobalRole.Name == globalRole {
+		return nil
+	}
+
+	userManagement := authorizer.AttributesRecord{
+		Resource:        iamv1alpha2.ResourcesPluralUser,
+		Verb:            "update",
+		ResourceScope:   apirequest.GlobalScope,
+		ResourceRequest: true,
+		User:            operator,
+	}
+	decision, _, err := h.authorizer.Authorize(userManagement)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+	if decision != authorizer.DecisionAllow {
+		err = errors.NewForbidden(iamv1alpha2.Resource(iamv1alpha2.ResourcesSingularUser),
+			user.Name, fmt.Errorf("update global role binding is not allowed"))
+		klog.Warning(err)
+		return err
+	}
+	if err := h.am.CreateGlobalRoleBinding(user.Name, globalRole); err != nil {
+		klog.Error(err)
+		return err
+	}
+	return nil
+}
+
+func handleError(request *restful.Request, response *restful.Response, err error) {
+	if errors.IsBadRequest(err) {
+		api.HandleBadRequest(response, request, err)
+	} else if errors.IsNotFound(err) {
+		api.HandleNotFound(response, request, err)
+	} else if errors.IsAlreadyExists(err) {
+		api.HandleConflict(response, request, err)
+	} else if errors.IsForbidden(err) {
+		api.HandleForbidden(response, request, err)
+	} else {
+		api.HandleInternalError(response, request, err)
+	}
 }

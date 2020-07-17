@@ -26,6 +26,8 @@ import (
 	apiserverconfig "kubesphere.io/kubesphere/pkg/apiserver/config"
 	"kubesphere.io/kubesphere/pkg/utils/signals"
 	"kubesphere.io/kubesphere/pkg/utils/term"
+
+	tracing "kubesphere.io/kubesphere/pkg/kapis/servicemesh/metrics/v1alpha2"
 )
 
 func NewAPIServerCommand() *cobra.Command {
@@ -52,6 +54,7 @@ cluster's shared state through which all other components interact.`,
 
 			return Run(s, signals.SetupSignalHandler())
 		},
+		SilenceUsage: true,
 	}
 
 	fs := cmd.Flags()
@@ -78,7 +81,7 @@ func Run(s *options.ServerRunOptions, stopCh <-chan struct{}) error {
 		return err
 	}
 
-	err = apiserver.PrepareRun()
+	err = apiserver.PrepareRun(stopCh)
 	if err != nil {
 		return nil
 	}
@@ -90,7 +93,10 @@ func initializeServicemeshConfig(s *options.ServerRunOptions) {
 	// Initialize kiali config
 	config := kconfig.NewConfig()
 
-	//tracing.JaegerQueryUrl = s.ServiceMeshOptions.JaegerQueryHost
+	// Config jaeger query endpoint address
+	if s.ServiceMeshOptions != nil && len(s.ServiceMeshOptions.JaegerQueryHost) != 0 {
+		tracing.JaegerQueryUrl = s.ServiceMeshOptions.JaegerQueryHost
+	}
 
 	// Exclude system namespaces
 	config.API.Namespaces.Exclude = []string{"istio-system", "kubesphere*", "kube*"}
